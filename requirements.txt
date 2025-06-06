@@ -1,6 +1,5 @@
 streamlit
 algosdk
-py-ipfs-cid
 pandas
 requests
 base58
