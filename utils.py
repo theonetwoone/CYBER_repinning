@@ -5,6 +5,7 @@ import requests
 import base58
 import algosdk.encoding
 import multibase
+import json
 
 def get_all_creator_assets(creator_address):
     """
@@ -44,28 +45,71 @@ def get_all_creator_assets(creator_address):
     except Exception as e:
         return [], f"Error fetching assets: {str(e)}"
 
+def detect_arc_standard(asset_params):
+    """
+    Detect which ARC standard an asset follows.
+    Returns: 'arc19', 'arc69', 'standard_ipfs', or 'unknown'
+    """
+    url = asset_params.get('url', '')
+    
+    # ARC-19: Uses template-ipfs:// format
+    if url.startswith('template-ipfs://'):
+        return 'arc19'
+    
+    # ARC-69: Has metadata in the 'am-' reserve field and may use standard IPFS URLs
+    # Check for ARC-69 metadata field (base64 encoded JSON in reserve)
+    reserve = asset_params.get('reserve', '')
+    if reserve:
+        try:
+            # ARC-69 stores metadata as base64 in the reserve field
+            decoded = base64.b64decode(reserve + '==')  # Add padding just in case
+            metadata = json.loads(decoded.decode('utf-8'))
+            if isinstance(metadata, dict) and ('image' in metadata or 'name' in metadata):
+                return 'arc69'
+        except:
+            pass
+    
+    # Standard IPFS URL
+    if url.startswith('ipfs://'):
+        return 'standard_ipfs'
+    
+    return 'unknown'
+
 def extract_cid_from_asset(asset):
     """
-    Extract CID from an Algorand asset using both ARC19 URL template parsing and standard IPFS URLs.
+    Extract CID from an Algorand asset supporting ARC-19, ARC-69, and standard IPFS URLs.
     Returns: CID string or None
     """
     try:
-        # Check if URL exists
-        if 'params' not in asset or 'url' not in asset['params']:
+        if 'params' not in asset:
             return None
+            
+        asset_params = asset['params']
+        arc_standard = detect_arc_standard(asset_params)
         
-        url = asset['params']['url']
-        if not url or not isinstance(url, str):
+        print(f"DEBUG: Asset {asset.get('index', 'Unknown')} detected as {arc_standard}")
+        
+        if arc_standard == 'arc19':
+            return extract_arc19_cid(asset_params)
+        elif arc_standard == 'arc69':
+            return extract_arc69_cid(asset_params)
+        elif arc_standard == 'standard_ipfs':
+            return extract_standard_ipfs_cid(asset_params)
+        
+        return None
+        
+    except Exception as e:
+        print(f"DEBUG: General error extracting CID: {e}")
+        return None
+
+def extract_arc19_cid(asset_params):
+    """Extract CID from ARC-19 template URL."""
+    try:
+        url = asset_params.get('url', '')
+        if not url:
             return None
-        
-        # First try standard IPFS URL format (like the Cyber Skulls collection)
-        if url.startswith('ipfs://'):
-            # Extract CID from standard IPFS URL
-            # Format: ipfs://bafybeifcx4fof2cixdkh5qo7fq44m4myo5cl34ayqw4g7vjfqmur2kc76e#i
-            cid_part = url.replace('ipfs://', '').split('#')[0].split('/')[0]
-            return cid_part
-        
-        # Then try ARC19 template format
+            
+        # Parse ARC19 template format
         pattern = re.compile(r"template-ipfs://\{ipfscid:(?P<version>\d+):(?P<codec>\w+):(?P<field>\w+):(?P<hash_type>[\w-]+)\}")
         match = pattern.match(url)
         
@@ -80,49 +124,39 @@ def extract_cid_from_asset(asset):
         hash_type = params['hash_type']
         
         # Get address from the correct field
-        address_to_decode = asset['params'].get(field_to_get)
+        address_to_decode = asset_params.get(field_to_get)
         if not address_to_decode:
             return None
         
-        print(f"DEBUG ARC19: Asset {asset['index']}, Field: {field_to_get}, Address: {address_to_decode}")
+        print(f"DEBUG ARC19: Field: {field_to_get}, Address: {address_to_decode}")
         
-        # Algorand addresses are base32 encoded, but we need the raw bytes for the hash
-        # Remove checksum and decode properly
+        # Decode using algosdk
         try:
-            # Decode Algorand address to get the raw public key hash
             decoded_address = algosdk.encoding.decode_address(address_to_decode)
             print(f"DEBUG ARC19: Decoded address bytes: {decoded_address.hex()}")
             
-            # For CIDv1, we need to construct: version + codec + multihash
+            # Construct CID based on version
             if cid_version == 1:
-                # Codec mapping
                 codec_map = {'raw': 0x55, 'dag-pb': 0x70, 'dag-cbor': 0x71}
                 codec_byte = codec_map.get(cid_codec, 0x55)
                 
-                # Multihash format: hash_type + length + hash
-                # sha2-256 = 0x12, length is 32 bytes (0x20)
                 if hash_type == 'sha2-256':
                     multihash = bytes([0x12, 0x20]) + decoded_address
                 else:
-                    # Default fallback
                     multihash = bytes([0x12, 0x20]) + decoded_address
                 
-                # Construct CIDv1: version(0x01) + codec + multihash
                 cid_bytes = bytes([0x01, codec_byte]) + multihash
-                
-                # Encode as base32 (CIDv1 standard)
                 cid_str = multibase.encode('base32', cid_bytes).decode('ascii')
                 print(f"DEBUG ARC19: Final CID: {cid_str}")
                 return cid_str
             else:
-                # CIDv0 - just base58 encode the hash
                 cid_str = base58.b58encode(decoded_address).decode('ascii')
                 print(f"DEBUG ARC19: CIDv0: {cid_str}")
                 return cid_str
                 
         except Exception as decode_error:
             print(f"DEBUG ARC19: Decode error: {decode_error}")
-            # Fallback to original method if algosdk decode fails
+            # Fallback method
             padded_address = address_to_decode + '=' * (-len(address_to_decode) % 8)
             decoded_bytes = base64.b32decode(padded_address)
             
@@ -136,7 +170,48 @@ def extract_cid_from_asset(asset):
                 return base58.b58encode(decoded_bytes).decode('ascii')
         
     except Exception as e:
-        print(f"DEBUG ARC19: General error: {e}")
+        print(f"DEBUG ARC19: Error: {e}")
+        return None
+
+def extract_arc69_cid(asset_params):
+    """Extract CID from ARC-69 metadata in reserve field."""
+    try:
+        reserve = asset_params.get('reserve', '')
+        if not reserve:
+            return None
+        
+        # Decode base64 metadata
+        import base64
+        decoded = base64.b64decode(reserve + '==')  # Add padding
+        metadata = json.loads(decoded.decode('utf-8'))
+        
+        # Extract image URL from metadata
+        image_url = metadata.get('image', '')
+        if image_url.startswith('ipfs://'):
+            cid_part = image_url.replace('ipfs://', '').split('#')[0].split('/')[0]
+            print(f"DEBUG ARC69: Extracted CID from metadata: {cid_part}")
+            return cid_part
+            
+        return None
+        
+    except Exception as e:
+        print(f"DEBUG ARC69: Error extracting from metadata: {e}")
+        return None
+
+def extract_standard_ipfs_cid(asset_params):
+    """Extract CID from standard IPFS URL."""
+    try:
+        url = asset_params.get('url', '')
+        if not url or not url.startswith('ipfs://'):
+            return None
+        
+        # Extract CID from standard IPFS URL
+        cid_part = url.replace('ipfs://', '').split('#')[0].split('/')[0]
+        print(f"DEBUG IPFS: Extracted CID: {cid_part}")
+        return cid_part
+        
+    except Exception as e:
+        print(f"DEBUG IPFS: Error: {e}")
         return None
 
 def fetch_metadata_and_extract_image_cid(metadata_cid):
@@ -179,9 +254,7 @@ def fetch_metadata_and_extract_image_cid(metadata_cid):
 def create_collection_dataframe(assets, existing_df=None):
     """
     Create a structured DataFrame from the list of assets.
-    For ARC-19 assets, includes both metadata and image CIDs.
-    If existing_df is provided, preserve statuses from previous runs (for retry functionality).
-    Returns: pandas DataFrame
+    Supports mixed ARC-19, ARC-69, and standard IPFS assets.
     """
     processed_data = []
     
@@ -200,18 +273,30 @@ def create_collection_dataframe(assets, existing_df=None):
         if asset.get('deleted', False):
             continue
             
+        asset_params = asset.get('params', {})
+        arc_standard = detect_arc_standard(asset_params)
         metadata_cid = extract_cid_from_asset(asset)
         
         if metadata_cid:  # Only include assets with valid CIDs
             asset_id = str(asset['index'])
-            asset_name = asset['params'].get('name', 'Unknown')
-            asset_url = asset['params'].get('url', '')
+            asset_name = asset_params.get('name', 'Unknown')
+            asset_url = asset_params.get('url', '')
             
-            # Check if this is an ARC-19 asset and fetch image CID
+            # Handle image CID extraction based on ARC standard
             image_cid = None
-            if asset_url.startswith('template-ipfs://'):
+            
+            if arc_standard == 'arc19':
+                # For ARC-19, fetch metadata to get image CID
                 print(f"🔍 ARC-19: Fetching metadata for asset {asset_id} ({asset_name}): {metadata_cid}")
                 image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
+            elif arc_standard == 'arc69':
+                # For ARC-69, image CID is already extracted from metadata
+                image_cid = metadata_cid  # In ARC-69, the metadata CID IS the image CID
+                print(f"🔍 ARC-69: Using metadata CID as image CID for asset {asset_id}: {image_cid}")
+            elif arc_standard == 'standard_ipfs':
+                # For standard IPFS, the URL directly points to the image
+                image_cid = metadata_cid  # The extracted CID is the image CID
+                print(f"🔍 Standard IPFS: Using URL CID as image CID for asset {asset_id}: {image_cid}")
             
             # Check if we have existing status for this asset
             if asset_id in existing_lookup:
@@ -220,11 +305,12 @@ def create_collection_dataframe(assets, existing_df=None):
                     "asset_id": asset_id,
                     "asset_name": asset_name,
                     "asset_url": asset_url,
+                    "arc_standard": arc_standard,  # NEW: Track ARC standard
                     "metadata_cid": metadata_cid,
-                    "image_cid": image_cid if image_cid else "",  # Use empty string instead of None
-                    "status": existing_data['status'],  # Preserve existing status
-                    "repin_cid": existing_data['repin_cid'] if existing_data['repin_cid'] else "",  # Preserve existing repin_cid
-                    "error_message": existing_data['error_message'] if existing_data['error_message'] else ""  # Preserve existing error
+                    "image_cid": image_cid if image_cid else "",
+                    "status": existing_data['status'],
+                    "repin_cid": existing_data['repin_cid'] if existing_data['repin_cid'] else "",
+                    "error_message": existing_data['error_message'] if existing_data['error_message'] else ""
                 }
             else:
                 # New asset or first run
@@ -232,11 +318,12 @@ def create_collection_dataframe(assets, existing_df=None):
                     "asset_id": asset_id,
                     "asset_name": asset_name,
                     "asset_url": asset_url,
+                    "arc_standard": arc_standard,  # NEW: Track ARC standard
                     "metadata_cid": metadata_cid,
-                    "image_cid": image_cid if image_cid else "",  # Use empty string instead of None
+                    "image_cid": image_cid if image_cid else "",
                     "status": "pending",
-                    "repin_cid": "",  # Use empty string instead of None
-                    "error_message": ""  # Use empty string instead of None
+                    "repin_cid": "",
+                    "error_message": ""
                 }
             processed_data.append(data_row)
     
@@ -248,6 +335,7 @@ def create_collection_dataframe(assets, existing_df=None):
             'asset_id': 'string',
             'asset_name': 'string', 
             'asset_url': 'string',
+            'arc_standard': 'string',  # NEW: ARC standard column
             'metadata_cid': 'string',
             'image_cid': 'string',
             'status': 'string',
@@ -1141,14 +1229,8 @@ RECOMMENDATION:
 
 def parse_wen_tools_csv(csv_content):
     """
-    Parse CSV content from wen.tools and convert to our internal format.
-    This function now also fetches metadata CIDs from Algorand blockchain
-    to ensure complete NFT preservation (both metadata + image CIDs).
-    
-    Expected columns in CSV:
-    - asset_id: Algorand asset ID
-    - name or unit-name: Asset name  
-    - image_ipfs_cid: IPFS CID or URL for the image
+    Parse CSV content with improved error handling for boolean NA values.
+    Also supports mixed ARC standards.
     """
     try:
         # Read CSV content
@@ -1156,7 +1238,8 @@ def parse_wen_tools_csv(csv_content):
             csv_content = csv_content.decode('utf-8')
         
         from io import StringIO
-        df_raw = pd.read_csv(StringIO(csv_content))
+        # Fix: Add na_filter=False to prevent boolean NA issues
+        df_raw = pd.read_csv(StringIO(csv_content), na_filter=False, dtype=str)
         
         if df_raw.empty:
             return None, "CSV file is empty", None
@@ -1202,19 +1285,20 @@ def parse_wen_tools_csv(csv_content):
             return None, f"Missing required columns: {missing_columns}. Available columns: {list(df_raw.columns)}", None
         
         processed_data = []
-        base_cid_tracker = {}  # Track base CIDs and their file counts
-        collection_types = set()  # Track what types of entries we see
+        base_cid_tracker = {}
+        collection_types = set()
+        arc_standards_found = set()  # NEW: Track ARC standards
         
         print(f"🔧 DEBUG: Starting to process {len(df_raw)} assets and fetch metadata CIDs...")
         
         for _, row in df_raw.iterrows():
-            # Skip rows with empty image_cid
+            # Skip rows with empty image_cid - handle string 'nan' and empty strings
             image_url = str(row.get(image_cid_col, '')).strip()
-            if not image_url or image_url.lower() in ['nan', 'none', '']:
+            if not image_url or image_url.lower() in ['nan', 'none', '', 'null']:
                 continue
             
             asset_id = str(row[asset_id_col]).strip()
-            asset_name = str(row[name_col]).strip()
+            asset_name = str(row[name_col]).strip() 
             
             print(f"🔧 DEBUG: Processing asset {asset_id} ({asset_name}), image URL: {image_url}")
             
@@ -1224,58 +1308,57 @@ def parse_wen_tools_csv(csv_content):
             full_ipfs_url = ""
             
             if image_url.startswith('ipfs://'):
-                # Full IPFS URL format
                 full_ipfs_url = image_url
                 ipfs_path = image_url.replace('ipfs://', '')
                 
                 if '/' in ipfs_path:
-                    # Directory-based: ipfs://CID/path/to/file.ext
                     parts = ipfs_path.split('/')
                     base_cid = parts[0]
                     file_path = '/' + '/'.join(parts[1:])
                     collection_types.add('directory_based')
                 else:
-                    # Just a CID: ipfs://CID
                     base_cid = ipfs_path
                     file_path = ""
                     collection_types.add('individual_cid')
             else:
-                # Assume it's a raw CID
                 base_cid = image_url
                 file_path = ""
                 full_ipfs_url = f"ipfs://{image_url}"
                 collection_types.add('individual_cid')
             
-            # 🚀 NEW: Fetch metadata CID from Algorand blockchain
+            # NEW: Enhanced metadata CID fetching with ARC standard detection
             metadata_cid = ""
+            arc_standard = "unknown"
+            
             try:
                 print(f"🔧 DEBUG: Fetching metadata CID for asset {asset_id}...")
                 from algosdk.v2client import algod
                 
-                # Use public Algorand node
                 algod_address = "https://mainnet-api.algonode.cloud"
                 algod_client = algod.AlgodClient("", algod_address)
                 
-                # Get asset info
                 asset_info = algod_client.asset_info(int(asset_id))
                 asset_params = asset_info.get('params', {})
                 
-                # Extract metadata from URL field (ARC-19 standard)
-                url = asset_params.get('url', '')
-                if url:
-                    metadata_cid = extract_cid_from_asset({'params': asset_params})
+                # Detect ARC standard and extract metadata
+                arc_standard = detect_arc_standard(asset_params)
+                arc_standards_found.add(arc_standard)
+                
+                if arc_standard in ['arc19', 'arc69', 'standard_ipfs']:
+                    metadata_cid = extract_cid_from_asset({'params': asset_params, 'index': asset_id})
                     if metadata_cid:
-                        print(f"🔧 DEBUG: ✅ Found metadata CID for {asset_id}: {metadata_cid[:20]}...")
+                        print(f"🔧 DEBUG: ✅ Found {arc_standard.upper()} metadata CID for {asset_id}: {metadata_cid[:20]}...")
                     else:
-                        print(f"🔧 DEBUG: ⚠️ No metadata CID found for {asset_id}")
+                        print(f"🔧 DEBUG: ⚠️ No metadata CID found for {arc_standard.upper()} asset {asset_id}")
                 else:
-                    print(f"🔧 DEBUG: ⚠️ No URL field found for asset {asset_id}")
+                    print(f"🔧 DEBUG: ⚠️ Unknown ARC standard for asset {asset_id}")
                     
             except Exception as e:
                 print(f"🔧 DEBUG: ❌ Error fetching metadata for asset {asset_id}: {str(e)}")
                 metadata_cid = ""
+                arc_standard = "error"
             
-            print(f"🔧 DEBUG: Parsed - base_cid: {base_cid}, file_path: {file_path}, metadata_cid: {metadata_cid[:20] if metadata_cid else 'None'}...")
+            print(f"🔧 DEBUG: Parsed - base_cid: {base_cid}, arc_standard: {arc_standard}, metadata_cid: {metadata_cid[:20] if metadata_cid else 'None'}...")
             
             # Track base CID usage for analysis
             if base_cid not in base_cid_tracker:
@@ -1285,18 +1368,20 @@ def parse_wen_tools_csv(csv_content):
                 'asset_name': asset_name,
                 'file_path': file_path,
                 'full_url': full_ipfs_url,
-                'metadata_cid': metadata_cid
+                'metadata_cid': metadata_cid,
+                'arc_standard': arc_standard
             })
             
             # Create data row in our internal format
             data_row = {
                 "asset_id": asset_id,
                 "asset_name": asset_name,
-                "asset_url": "",  # Not typically available in CSV
-                "metadata_cid": metadata_cid,  # 🚀 NOW FETCHED FROM BLOCKCHAIN
-                "image_cid": base_cid,  # Store base CID for pinning
-                "image_file_path": file_path,  # Store individual file path
-                "full_ipfs_url": full_ipfs_url,  # Store complete IPFS URL for reference
+                "asset_url": "",
+                "arc_standard": arc_standard,  # NEW: Track ARC standard
+                "metadata_cid": metadata_cid,
+                "image_cid": base_cid,
+                "image_file_path": file_path,
+                "full_ipfs_url": full_ipfs_url,
                 "status": "pending",
                 "repin_cid": "",
                 "error_message": ""
@@ -1307,25 +1392,19 @@ def parse_wen_tools_csv(csv_content):
         df = pd.DataFrame(processed_data)
         
         if not df.empty:
-            df = df.astype({
-                'asset_id': 'string',
-                'asset_name': 'string', 
-                'asset_url': 'string',
-                'metadata_cid': 'string',
-                'image_cid': 'string',
-                'image_file_path': 'string',
-                'full_ipfs_url': 'string',
-                'status': 'string',
-                'repin_cid': 'string',
-                'error_message': 'string'
-            })
+            # Fix: Ensure all columns are properly typed as strings
+            string_columns = ['asset_id', 'asset_name', 'asset_url', 'arc_standard', 'metadata_cid', 
+                            'image_cid', 'image_file_path', 'full_ipfs_url', 'status', 'repin_cid', 'error_message']
+            
+            for col in string_columns:
+                if col in df.columns:
+                    df[col] = df[col].astype('string')
         
-        # Analyze collection structure
+        # Enhanced collection analysis
         unique_base_cids = len(base_cid_tracker)
         total_assets = len(df)
         metadata_cids_found = sum(1 for _, row in df.iterrows() if row['metadata_cid'])
         
-        # Determine collection type
         if 'directory_based' in collection_types and unique_base_cids < total_assets:
             collection_type = 'directory_based'
         elif len(collection_types) == 1 and 'individual_cid' in collection_types:
@@ -1339,6 +1418,7 @@ def parse_wen_tools_csv(csv_content):
             'metadata_cids_found': metadata_cids_found,
             'collection_type': collection_type,
             'collection_types_detected': list(collection_types),
+            'arc_standards_found': list(arc_standards_found),  # NEW: ARC standards info
             'is_directory_collection': unique_base_cids < total_assets,
             'base_cid_info': base_cid_tracker,
             'detected_columns': {
@@ -1348,11 +1428,14 @@ def parse_wen_tools_csv(csv_content):
             }
         }
         
-        print(f"🔧 DEBUG: Collection analysis - type: {collection_type}, unique image CIDs: {unique_base_cids}, metadata CIDs found: {metadata_cids_found}, total assets: {total_assets}")
+        print(f"🔧 DEBUG: Collection analysis - type: {collection_type}, ARC standards: {arc_standards_found}, unique image CIDs: {unique_base_cids}, metadata CIDs found: {metadata_cids_found}, total assets: {total_assets}")
         
         return df, None, collection_info
         
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"🔧 DEBUG: Full CSV parsing error: {error_details}")
         return None, f"Error parsing CSV: {str(e)}", None
 
 def analyze_collection_structure(df):

@@ -261,4 +261,23 @@ Your support helps us continue developing free tools for the Algorand NFT commun
 
 ---
 
-*CYBER SKULLS REPINNING PROTOCOL v2.1 // OPTIMIZED FOR 4EVERLAND // CREATED BY ThΞOneTwo* 
+*CYBER SKULLS REPINNING PROTOCOL v2.1 // OPTIMIZED FOR 4EVERLAND // CREATED BY ThΞOneTwo*
+
+## 🌐 Gateway Risk Tester
+
+A companion tool to analyze IPFS gateway availability and assess redundancy risk for your NFT collections.
+
+### Features
+- 👛 **Wallet Analysis**: Automatically test random assets from any Algorand wallet
+- 🎯 **Strategic Sampling**: Tests assets from different parts of collections
+- 📊 **Risk Assessment**: Categorizes CIDs by availability risk level
+- 🌐 **Gateway Performance**: Real-time analysis of IPFS gateway reliability
+
+### Quick Start
+```bash
+python run_gateway_tester.py
+# Or double-click: run_gateway_tester.bat (Windows)
+```
+
+### Live Demo
+🔗 [Gateway Risk Tester](https:/gatewaytester.streamlit.app) 
