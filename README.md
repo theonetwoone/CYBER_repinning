@@ -83,10 +83,11 @@ Choose one of three methods:
 ### Step 5: Configure API Key
 
 1. Sign up for [4everland.org](https://dashboard.4everland.org/)
-2. Create an IPFS Bucket
-3. Generate API Keys
-4. Paste your Bearer token in the tool
-5. Click "🧪 Test API Key" to verify
+2. Create or select an IPFS Bucket
+3. Go to the [Pinning Service page](https://dashboard.4everland.org/bucket/pinning-service)
+4. Generate and copy your **Access Token** (this is your Bearer token)
+5. Paste your Bearer token into the tool
+6. Click "🧪 Test API Key" to verify
 
 ### Step 6: Run Migration
 
