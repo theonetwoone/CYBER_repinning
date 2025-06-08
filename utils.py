@@ -6,6 +6,7 @@ import base58
 import algosdk.encoding
 import multibase
 import json
+import time
 
 def get_all_creator_assets(creator_address):
     """
@@ -874,25 +875,73 @@ def pin_asset_cids(service_name, api_key, metadata_cid, image_cid=None):
 def verify_pinned_cids(service_name, api_key, cids_to_check):
     """
     Verify that CIDs are actually pinned on the service.
-    Returns: (verified_count, total_count, details)
+    Returns: (verified_count, total_count, details, duplicate_report)
     """
     if not cids_to_check:
-        return 0, 0, []
+        return 0, 0, [], None
     
     verified_count = 0
     details = []
+    duplicate_report = None
     
-    for cid in cids_to_check:
-        is_pinned, status_info = check_pin_status(service_name, api_key, cid)
-        details.append({
-            'cid': cid,
-            'is_pinned': is_pinned,
-            'status': status_info
-        })
-        if is_pinned:
-            verified_count += 1
+    # For 4everland, optimize by fetching all pins once and checking locally
+    if service_name.split(" ")[0].lower() == "4everland":
+        print(f"DEBUG VERIFICATION: Optimizing 4everland verification for {len(cids_to_check)} CIDs...")
+        pin_lookup, duplicate_report = _get_4everland_pin_lookup(api_key)
+        
+        if pin_lookup is not None:
+            print(f"DEBUG VERIFICATION: Starting CID verification against lookup...")
+            
+            for i, cid in enumerate(cids_to_check):
+                # Progress feedback every 100 CIDs
+                if i % 100 == 0:
+                    print(f"DEBUG VERIFICATION: Checking CID {i+1}/{len(cids_to_check)} ({(i+1)/len(cids_to_check)*100:.1f}%)")
+                
+                if cid in pin_lookup:
+                    status = pin_lookup[cid]
+                    valid_statuses = ['pinned', 'queued', 'pinning', 'processing']
+                    is_pinned = status in valid_statuses
+                    details.append({
+                        'cid': cid,
+                        'is_pinned': is_pinned,
+                        'status': f"Status: {status}"
+                    })
+                    if is_pinned:
+                        verified_count += 1
+                else:
+                    details.append({
+                        'cid': cid,
+                        'is_pinned': False,
+                        'status': "Not found in completed pins (may be pending/processing)"
+                    })
+            
+            print(f"DEBUG VERIFICATION: CID verification complete - {verified_count}/{len(cids_to_check)} verified")
+            
+        else:
+            # Fallback to individual checks if bulk fetch failed
+            print("DEBUG VERIFICATION: Bulk fetch failed, falling back to individual checks...")
+            for cid in cids_to_check:
+                is_pinned, status_info = check_pin_status(service_name, api_key, cid)
+                details.append({
+                    'cid': cid,
+                    'is_pinned': is_pinned,
+                    'status': status_info
+                })
+                if is_pinned:
+                    verified_count += 1
+    else:
+        # For other services, use individual checks
+        for cid in cids_to_check:
+            is_pinned, status_info = check_pin_status(service_name, api_key, cid)
+            details.append({
+                'cid': cid,
+                'is_pinned': is_pinned,
+                'status': status_info
+            })
+            if is_pinned:
+                verified_count += 1
     
-    return verified_count, len(cids_to_check), details
+    return verified_count, len(cids_to_check), details, duplicate_report
 
 def check_pin_status(service_name, api_key, cid):
     """
@@ -917,6 +966,160 @@ def check_pin_status(service_name, api_key, cid):
     except Exception as e:
         return False, f"Error checking pin status: {str(e)}"
 
+def _get_4everland_pin_lookup(api_key):
+    """
+    Fetch all pins from 4everland and return both lookup and duplicate info.
+    Returns: (pin_lookup_dict, duplicate_report) or (None, None) if failed
+    """
+    try:
+        url = "https://api.4everland.dev/pins"
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        # First, try to get total count by making a small request
+        print("DEBUG VERIFICATION: Getting pin count...")
+        test_response = requests.get(url, headers=headers, params={'limit': 1}, timeout=15)
+        
+        if test_response.status_code != 200:
+            print(f"DEBUG VERIFICATION: Failed to get pin count: HTTP {test_response.status_code}")
+            return None, None
+            
+        # Check if the API returns total count information
+        test_data = test_response.json()
+        print(f"DEBUG VERIFICATION: API response structure: {list(test_data.keys())}")
+        
+        # Try different page sizes to find the maximum
+        page_sizes_to_try = [2000, 1500, 1000]  # Try larger sizes first
+        best_page_size = 1000
+        
+        for size in page_sizes_to_try:
+            print(f"DEBUG VERIFICATION: Testing page size {size}...")
+            test_resp = requests.get(url, headers=headers, params={'limit': size}, timeout=15)
+            if test_resp.status_code == 200:
+                best_page_size = size
+                print(f"DEBUG VERIFICATION: Page size {size} works!")
+                break
+            else:
+                print(f"DEBUG VERIFICATION: Page size {size} failed: HTTP {test_resp.status_code}")
+        
+        print(f"DEBUG VERIFICATION: Using page size: {best_page_size}")
+        
+        # Start fetching all pins
+        all_results = []
+        limit = best_page_size
+        offset = 0
+        page_count = 0
+        start_time = time.time()
+        
+        # Remove artificial page limit - let it fetch everything
+        while True:
+            page_start_time = time.time()
+            
+            params = {
+                'limit': limit,
+                'offset': offset
+            }
+            
+            print(f"DEBUG VERIFICATION: Fetching page {page_count + 1} (offset {offset}, expecting up to {limit} pins)...")
+            
+            response = requests.get(url, headers=headers, params=params, timeout=45)
+            page_time = time.time() - page_start_time
+            
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get('results', [])
+                all_results.extend(results)
+                page_count += 1
+                
+                print(f"DEBUG VERIFICATION: Page {page_count} retrieved {len(results)} pins in {page_time:.1f}s (total: {len(all_results)})")
+                
+                # If we got fewer results than the limit, we've reached the end
+                if len(results) < limit:
+                    print(f"DEBUG VERIFICATION: Reached end - got {len(results)} < {limit}")
+                    break
+                
+                # Safety check for total time (increased to 10 minutes)
+                total_time = time.time() - start_time
+                if total_time > 600:  # 10 minutes
+                    print(f"DEBUG VERIFICATION: Time limit reached ({total_time:.1f}s) - stopping at {len(all_results)} pins")
+                    break
+                    
+                offset += limit
+                
+                # Reduced delay to speed up
+                time.sleep(0.2)
+                
+            elif response.status_code == 429:  # Rate limited
+                print("DEBUG VERIFICATION: Rate limited - waiting 10 seconds...")
+                time.sleep(10)
+                continue
+            else:
+                print(f"DEBUG VERIFICATION: Failed to fetch page {page_count + 1}: HTTP {response.status_code}")
+                return None, None
+        
+        total_time = time.time() - start_time
+        print(f"DEBUG VERIFICATION: Completed in {total_time:.1f}s - retrieved {len(all_results)} pins across {page_count} pages")
+        
+        # Analyze for duplicates and create lookup
+        pin_lookup = {}
+        cid_counts = {}
+        duplicate_details = {}
+        
+        for pin in all_results:
+            pin_cid = pin.get('pin', {}).get('cid', '')
+            status = pin.get('status', 'unknown')
+            request_id = pin.get('requestid', 'unknown')
+            created = pin.get('created', 'unknown')
+            
+            if pin_cid:
+                # Count occurrences
+                if pin_cid not in cid_counts:
+                    cid_counts[pin_cid] = 0
+                    duplicate_details[pin_cid] = []
+                
+                cid_counts[pin_cid] += 1
+                duplicate_details[pin_cid].append({
+                    'request_id': request_id,
+                    'status': status,
+                    'created': created
+                })
+                
+                # For lookup, prefer 'pinned' status over others
+                if pin_cid not in pin_lookup or status == 'pinned':
+                    pin_lookup[pin_cid] = status
+        
+        # Generate duplicate report
+        duplicates = {cid: count for cid, count in cid_counts.items() if count > 1}
+        
+        duplicate_report = {
+            'total_pins': len(all_results),
+            'unique_cids': len(pin_lookup),
+            'duplicate_cids': len(duplicates),
+            'total_duplicates': sum(duplicates.values()) - len(duplicates),  # Extra pins beyond first
+            'details': {cid: duplicate_details[cid] for cid in duplicates}
+        }
+        
+        if duplicates:
+            print(f"🚨 DUPLICATE DETECTION: Found {len(duplicates)} CIDs with duplicates!")
+            print(f"   • {duplicate_report['total_duplicates']} unnecessary duplicate pins")
+            print(f"   • Potential cost savings from cleanup")
+            
+            # Show top 5 duplicates
+            top_duplicates = sorted(duplicates.items(), key=lambda x: x[1], reverse=True)[:5]
+            for cid, count in top_duplicates:
+                print(f"   • {cid[:16]}... appears {count} times")
+        else:
+            print("✅ NO DUPLICATES: All pins are unique")
+        
+        print(f"DEBUG VERIFICATION: Created lookup for {len(pin_lookup)} unique pins")
+        return pin_lookup, duplicate_report
+        
+    except Exception as e:
+        print(f"DEBUG VERIFICATION: Exception fetching pin lookup: {str(e)}")
+        return None, None
+
 def _check_4everland_pin_status(api_key, cid):
     """
     Check pin status on 4everland using pin list endpoint.
@@ -934,6 +1137,7 @@ def _check_4everland_pin_status(api_key, cid):
         all_results = []
         limit = 1000
         offset = 0
+        page_count = 0
         
         # Handle pagination to get all pins
         while True:
@@ -948,11 +1152,13 @@ def _check_4everland_pin_status(api_key, cid):
                 data = response.json()
                 results = data.get('results', [])
                 all_results.extend(results)
+                page_count += 1
                 
-                # Debug: Print first few results to understand structure
+                # Debug: Only print for first page to avoid spam
                 if offset == 0 and results:
-                    print(f"DEBUG VERIFICATION: Sample pin structure: {results[0]}")
-                    print(f"DEBUG VERIFICATION: Total results in this page: {len(results)}")
+                    print(f"DEBUG VERIFICATION: Retrieved {len(results)} pins on first page")
+                    if len(results) == limit:
+                        print(f"DEBUG VERIFICATION: Pagination detected - fetching all pages...")
                 
                 # If we got fewer results than the limit, we've reached the end
                 if len(results) < limit:
@@ -963,19 +1169,18 @@ def _check_4everland_pin_status(api_key, cid):
                 print(f"DEBUG VERIFICATION: HTTP {response.status_code}: {response.text}")
                 return False, f"HTTP {response.status_code}: {response.text}"
         
-        print(f"DEBUG VERIFICATION: Total completed pins retrieved: {len(all_results)}")
+        if page_count > 1:
+            print(f"DEBUG VERIFICATION: Retrieved {len(all_results)} total pins across {page_count} pages")
         
         # Search for the CID in all results
         for pin in all_results:
             pin_cid = pin.get('pin', {}).get('cid', '')
             if pin_cid == cid:
                 status = pin.get('status', 'unknown')
-                print(f"DEBUG VERIFICATION: Found CID {cid[:16]}... with status: {status}")
                 # Accept pinned, queued, pinning, and processing as valid statuses
                 valid_statuses = ['pinned', 'queued', 'pinning', 'processing']
                 return status in valid_statuses, f"Status: {status}"
         
-        print(f"DEBUG VERIFICATION: CID {cid[:16]}... not found in {len(all_results)} completed pins")
         # Important: Not found in /pins doesn't mean it failed - it might be pending/processing
         return False, "Not found in completed pins (may be pending/processing - check https://dashboard.4everland.org/bucket/pinning-service)"
         
@@ -1652,4 +1857,337 @@ def get_cids_to_pin(df, strategy="auto"):
         return df['image_cid'].tolist()
     else:
         # Default fallback
-        return df['image_cid'].unique().tolist() 
+        return df['image_cid'].unique().tolist()
+
+def _get_4everland_pin_lookup_with_duplicates(api_key):
+    """
+    Fetch all pins from 4everland and return both lookup and duplicate info.
+    Returns: (pin_lookup_dict, duplicate_report) or (None, None) if failed
+    """
+    try:
+        url = "https://api.4everland.dev/pins"
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Fetch all pins (using the improved pagination logic)
+        all_results = []
+        limit = 2000
+        offset = 0
+        page_count = 0
+        start_time = time.time()
+        
+        while True:
+            params = {'limit': limit, 'offset': offset}
+            response = requests.get(url, headers=headers, params=params, timeout=45)
+            
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get('results', [])
+                all_results.extend(results)
+                page_count += 1
+                
+                print(f"DEBUG VERIFICATION: Page {page_count} retrieved {len(results)} pins (total: {len(all_results)})")
+                
+                if len(results) < limit:
+                    break
+                offset += limit
+                time.sleep(0.2)
+            else:
+                print(f"DEBUG VERIFICATION: Failed: HTTP {response.status_code}")
+                return None, None
+        
+        print(f"DEBUG VERIFICATION: Retrieved {len(all_results)} total pins")
+        
+        # Analyze for duplicates and create lookup
+        pin_lookup = {}
+        cid_counts = {}
+        duplicate_details = {}
+        
+        for pin in all_results:
+            pin_cid = pin.get('pin', {}).get('cid', '')
+            status = pin.get('status', 'unknown')
+            request_id = pin.get('requestid', 'unknown')
+            created = pin.get('created', 'unknown')
+            
+            if pin_cid:
+                # Count occurrences
+                if pin_cid not in cid_counts:
+                    cid_counts[pin_cid] = 0
+                    duplicate_details[pin_cid] = []
+                
+                cid_counts[pin_cid] += 1
+                duplicate_details[pin_cid].append({
+                    'request_id': request_id,
+                    'status': status,
+                    'created': created
+                })
+                
+                # For lookup, prefer 'pinned' status over others
+                if pin_cid not in pin_lookup or status == 'pinned':
+                    pin_lookup[pin_cid] = status
+        
+        # Generate duplicate report
+        duplicates = {cid: count for cid, count in cid_counts.items() if count > 1}
+        
+        duplicate_report = {
+            'total_pins': len(all_results),
+            'unique_cids': len(pin_lookup),
+            'duplicate_cids': len(duplicates),
+            'total_duplicates': sum(duplicates.values()) - len(duplicates),  # Extra pins beyond first
+            'details': {cid: duplicate_details[cid] for cid in duplicates}
+        }
+        
+        if duplicates:
+            print(f"🚨 DUPLICATE DETECTION: Found {len(duplicates)} CIDs with duplicates!")
+            print(f"   • {duplicate_report['total_duplicates']} unnecessary duplicate pins")
+            print(f"   • Potential cost savings from cleanup")
+            
+            # Show top 5 duplicates
+            top_duplicates = sorted(duplicates.items(), key=lambda x: x[1], reverse=True)[:5]
+            for cid, count in top_duplicates:
+                print(f"   • {cid[:16]}... appears {count} times")
+        else:
+            print("✅ NO DUPLICATES: All pins are unique")
+        
+        print(f"DEBUG VERIFICATION: Created lookup for {len(pin_lookup)} unique pins")
+        return pin_lookup, duplicate_report
+        
+    except Exception as e:
+        print(f"DEBUG VERIFICATION: Exception: {str(e)}")
+        return None, None
+
+def verify_pinned_cids_with_duplicate_detection(service_name, api_key, cids_to_check):
+    """Enhanced verification with duplicate detection"""
+    if not cids_to_check:
+        return 0, 0, [], None
+    
+    verified_count = 0
+    details = []
+    duplicate_report = None
+    
+    if service_name.split(" ")[0].lower() == "4everland":
+        print(f"DEBUG VERIFICATION: Optimizing 4everland verification for {len(cids_to_check)} CIDs...")
+        pin_lookup, duplicate_report = _get_4everland_pin_lookup_with_duplicates(api_key)
+        
+        if pin_lookup is not None:
+            # Check each CID
+            for cid in cids_to_check:
+                if cid in pin_lookup:
+                    status = pin_lookup[cid]
+                    valid_statuses = ['pinned', 'queued', 'pinning', 'processing']
+                    is_pinned = status in valid_statuses
+                    details.append({
+                        'cid': cid,
+                        'is_pinned': is_pinned,
+                        'status': f"Status: {status}"
+                    })
+                    if is_pinned:
+                        verified_count += 1
+                else:
+                    details.append({
+                        'cid': cid,
+                        'is_pinned': False,
+                        'status': "Not found in completed pins"
+                    })
+    
+    return verified_count, len(cids_to_check), details, duplicate_report
+
+def _delete_4everland_pin(api_key, request_id):
+    """
+    Delete a specific pin by request ID on 4everland.
+    Returns: (success, message)
+    """
+    try:
+        url = f"https://api.4everland.dev/pins/{request_id}"
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.delete(url, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            return True, "Pin deleted successfully"
+        elif response.status_code == 202:
+            return True, "Pin deletion accepted (processing asynchronously)"
+        elif response.status_code == 404:
+            return False, "Pin not found (may already be deleted)"
+        elif response.status_code == 403:
+            return False, "Permission denied - check API key permissions"
+        else:
+            return False, f"Failed to delete pin: HTTP {response.status_code}"
+            
+    except Exception as e:
+        return False, f"Exception deleting pin: {str(e)}"
+
+def cleanup_duplicate_pins(api_key, duplicate_report, dry_run=True):
+    """
+    Clean up duplicate pins, keeping the best copy of each CID.
+    
+    Args:
+        api_key: 4everland API key
+        duplicate_report: Report from verification with duplicate details
+        dry_run: If True, only simulate deletion without actually deleting
+    
+    Returns: dict with cleanup results
+    """
+    if not duplicate_report or duplicate_report['duplicate_cids'] == 0:
+        return {
+            'success': True,
+            'message': 'No duplicates found to clean up',
+            'deleted_count': 0,
+            'kept_count': 0,
+            'savings': 0,
+            'details': []
+        }
+    
+    print(f"🧹 DUPLICATE CLEANUP: Starting {'DRY RUN' if dry_run else 'ACTUAL DELETION'}")
+    print(f"   • Found {duplicate_report['duplicate_cids']} CIDs with duplicates")
+    print(f"   • Total unnecessary duplicates: {duplicate_report['total_duplicates']}")
+    
+    cleanup_results = {
+        'success': True,
+        'deleted_count': 0,
+        'kept_count': 0,
+        'failed_deletions': 0,
+        'savings': 0,
+        'details': [],
+        'errors': []
+    }
+    
+    # Process each CID with duplicates
+    for cid, instances in duplicate_report['details'].items():
+        if len(instances) <= 1:
+            continue  # Skip if not actually duplicated
+            
+        print(f"\n🔍 Processing CID: {cid[:20]}... ({len(instances)} copies)")
+        
+        # Sort instances to determine which to keep (priority order):
+        # 1. Status 'pinned' over others
+        # 2. Newer creation date
+        # 3. Lexicographically smaller request_id (for consistency)
+        def sort_key(instance):
+            status_priority = {'pinned': 0, 'queued': 1, 'pinning': 2, 'processing': 3, 'failed': 4}
+            status_score = status_priority.get(instance['status'], 5)
+            
+            # Parse creation date (newer = lower score)
+            try:
+                from datetime import datetime
+                created_date = datetime.fromisoformat(instance['created'].replace('Z', '+00:00'))
+                date_score = -created_date.timestamp()  # Negative so newer is "smaller"
+            except:
+                date_score = 0
+                
+            return (status_score, date_score, instance['request_id'])
+        
+        sorted_instances = sorted(instances, key=sort_key)
+        
+        # Keep the first (best) instance, delete the rest
+        keep_instance = sorted_instances[0]
+        delete_instances = sorted_instances[1:]
+        
+        print(f"   ✅ Keeping: {keep_instance['status']} - {keep_instance['created'][:10]} - ID: {keep_instance['request_id'][:8]}...")
+        cleanup_results['kept_count'] += 1
+        
+        cid_details = {
+            'cid': cid,
+            'total_instances': len(instances),
+            'kept_instance': keep_instance,
+            'deleted_instances': [],
+            'failed_deletions': []
+        }
+        
+        # Delete the duplicates
+        for instance in delete_instances:
+            print(f"   🗑️  {'[DRY RUN]' if dry_run else 'Deleting'}: {instance['status']} - {instance['created'][:10]} - ID: {instance['request_id'][:8]}...")
+            
+            if not dry_run:
+                success, message = _delete_4everland_pin(api_key, instance['request_id'])
+                
+                if success:
+                    print(f"      ✅ Deleted successfully")
+                    cleanup_results['deleted_count'] += 1
+                    cid_details['deleted_instances'].append(instance)
+                else:
+                    print(f"      ❌ Failed: {message}")
+                    cleanup_results['failed_deletions'] += 1
+                    cleanup_results['errors'].append(f"Failed to delete {instance['request_id']}: {message}")
+                    cid_details['failed_deletions'].append({'instance': instance, 'error': message})
+                
+                # Small delay to avoid rate limiting
+                time.sleep(0.5)
+            else:
+                cleanup_results['deleted_count'] += 1
+                cid_details['deleted_instances'].append(instance)
+        
+        cleanup_results['details'].append(cid_details)
+    
+    # Calculate savings (rough estimate)
+    successful_deletions = cleanup_results['deleted_count'] - cleanup_results['failed_deletions']
+    cleanup_results['savings'] = successful_deletions * 0.08  # ~$0.08/GB/month estimate
+    
+    print(f"\n📊 CLEANUP SUMMARY:")
+    print(f"   • CIDs processed: {len(cleanup_results['details'])}")
+    print(f"   • Pins kept: {cleanup_results['kept_count']}")
+    print(f"   • Pins {'would be ' if dry_run else ''}deleted: {cleanup_results['deleted_count']}")
+    if cleanup_results['failed_deletions'] > 0:
+        print(f"   • Failed deletions: {cleanup_results['failed_deletions']}")
+    print(f"   • Estimated monthly savings: ${cleanup_results['savings']:.2f}")
+    
+    return cleanup_results
+
+def verify_cleanup_success(api_key, cleanup_results):
+    """
+    Verify that cleanup was successful and all unique CIDs still exist.
+    Returns: (success, verification_report)
+    """
+    print(f"\n🔍 VERIFYING CLEANUP SUCCESS...")
+    
+    # Get fresh pin lookup after cleanup
+    pin_lookup, _ = _get_4everland_pin_lookup(api_key)
+    
+    if not pin_lookup:
+        return False, {'error': 'Failed to fetch updated pin list for verification'}
+    
+    verification_results = {
+        'success': True,
+        'verified_cids': 0,
+        'missing_cids': 0,
+        'missing_details': [],
+        'verified_details': []
+    }
+    
+    # Check that each cleaned CID still has at least one pin
+    for cid_detail in cleanup_results['details']:
+        cid = cid_detail['cid']
+        
+        if cid in pin_lookup:
+            print(f"   ✅ {cid[:20]}... still pinned (status: {pin_lookup[cid]})")
+            verification_results['verified_cids'] += 1
+            verification_results['verified_details'].append({
+                'cid': cid,
+                'current_status': pin_lookup[cid],
+                'kept_instance': cid_detail['kept_instance']['request_id']
+            })
+        else:
+            print(f"   ❌ {cid[:20]}... MISSING - cleanup may have failed!")
+            verification_results['success'] = False
+            verification_results['missing_cids'] += 1
+            verification_results['missing_details'].append({
+                'cid': cid,
+                'kept_instance': cid_detail['kept_instance']['request_id'],
+                'deleted_count': len(cid_detail['deleted_instances'])
+            })
+    
+    print(f"\n📋 VERIFICATION RESULTS:")
+    print(f"   • Verified CIDs: {verification_results['verified_cids']}")
+    print(f"   • Missing CIDs: {verification_results['missing_cids']}")
+    
+    if verification_results['success']:
+        print("   ✅ All CIDs successfully preserved!")
+    else:
+        print("   ❌ Some CIDs may have been lost during cleanup!")
+    
+    return verification_results['success'], verification_results

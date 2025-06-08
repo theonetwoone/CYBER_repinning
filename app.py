@@ -560,6 +560,10 @@ def main():
 
                 # Test API Key button
                 if api_key_input:
+                    # Store API key in session state for use by cleanup functions
+                    st.session_state.api_key = api_key_input
+                    st.session_state.selected_service = selected_service
+                    
                     if st.button("🧪 Test API Key", type="secondary"):
                         with st.spinner("🧪 Validating API credentials..."):
                             from utils import validate_api_key
@@ -579,6 +583,11 @@ def main():
                         else:
                             st.warning("⚠️ No collection loaded to verify.")
                 else:
+                    # Clear API key from session state if no input
+                    if hasattr(st.session_state, 'api_key'):
+                        del st.session_state.api_key
+                    if hasattr(st.session_state, 'selected_service'):
+                        del st.session_state.selected_service
                     st.info("💡 **Tip:** Enter your API key above to unlock verification and migration features.")
 
     # Main content area
@@ -1224,6 +1233,215 @@ def display_verification_results():
     else:
         st.error(f"❌ Verification failed: 0/{results['total_count']} CIDs found")
     
+    # Show duplicate detection results
+    duplicate_report = results.get('duplicate_report')
+    if duplicate_report:
+        if duplicate_report['duplicate_cids'] > 0:
+            st.warning(f"🚨 **Duplicate Detection**: Found {duplicate_report['duplicate_cids']} CIDs with duplicates!")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Pins", duplicate_report['total_pins'])
+            with col2:
+                st.metric("Unique CIDs", duplicate_report['unique_cids'])
+            with col3:
+                st.metric("Unnecessary Duplicates", duplicate_report['total_duplicates'])
+            
+            if duplicate_report['total_duplicates'] > 0:
+                potential_savings = duplicate_report['total_duplicates'] * 0.08  # Rough estimate at $0.08/GB/month
+                st.info(f"💰 **Potential Monthly Savings**: ~${potential_savings:.2f} by removing duplicate pins")
+                
+                # Store duplicate report separately for cleanup operations
+                st.session_state.current_duplicate_report = duplicate_report
+                
+                # Add cleanup buttons
+                st.markdown("---")
+                st.subheader("🧹 Duplicate Cleanup Options")
+                
+                # Debug info (can remove later)
+                if st.checkbox("🔧 Show Debug Info", value=False):
+                    st.write("**Session State Debug:**")
+                    st.write(f"- has current_duplicate_report: {hasattr(st.session_state, 'current_duplicate_report')}")
+                    st.write(f"- has show_delete_confirmation: {hasattr(st.session_state, 'show_delete_confirmation')}")
+                    st.write(f"- has cleanup_preview: {hasattr(st.session_state, 'cleanup_preview')}")
+                    st.write(f"- has cleanup_results: {hasattr(st.session_state, 'cleanup_results')}")
+                    st.write(f"- API key exists: {'api_key' in st.session_state and bool(st.session_state.api_key)}")
+                
+                col_dry, col_real = st.columns(2)
+                
+                with col_dry:
+                    if st.button("🔍 Preview Cleanup (Dry Run)", help="See what would be deleted without actually deleting anything", key="preview_cleanup_btn"):
+                        if 'api_key' in st.session_state and st.session_state.api_key:
+                            with st.spinner("Running cleanup preview..."):
+                                from utils import cleanup_duplicate_pins
+                                
+                                cleanup_results = cleanup_duplicate_pins(
+                                    st.session_state.api_key, 
+                                    st.session_state.current_duplicate_report,  # Use preserved report
+                                    dry_run=True
+                                )
+                                
+                                # Store results for display
+                                st.session_state.cleanup_preview = cleanup_results
+                                st.rerun()
+                        else:
+                            st.error("❌ API key not found. Please re-enter your API key.")
+                
+                with col_real:
+                    if st.button("🗑️ **DELETE DUPLICATES**", help="⚠️ WARNING: This will permanently delete duplicate pins!", type="secondary", key="delete_duplicates_btn"):
+                        # Ensure we have the duplicate report and API key
+                        if not hasattr(st.session_state, 'current_duplicate_report'):
+                            st.error("❌ Duplicate report not found. Please run verification again.")
+                        elif not ('api_key' in st.session_state and st.session_state.api_key):
+                            st.error("❌ API key not found. Please re-enter your API key.")
+                        else:
+                            # Set confirmation dialog flag
+                            st.session_state.show_delete_confirmation = True
+                            st.rerun()
+                
+                # Show delete confirmation dialog
+                if hasattr(st.session_state, 'show_delete_confirmation') and st.session_state.show_delete_confirmation:
+                    st.error("⚠️ **DANGER ZONE** ⚠️")
+                    st.markdown("**You are about to PERMANENTLY DELETE duplicate pins.**")
+                    st.markdown("This action:")
+                    st.markdown("- ✅ Will keep the best copy of each unique CID")
+                    st.markdown("- ✅ Will be verified afterward to ensure no data loss")  
+                    st.markdown("- ❌ **CANNOT be undone**")
+                    
+                    col_confirm, col_cancel = st.columns(2)
+                    
+                    with col_confirm:
+                        if st.button("✅ YES, DELETE DUPLICATES", type="primary"):
+                            with st.spinner("Deleting duplicate pins..."):
+                                from utils import cleanup_duplicate_pins, verify_cleanup_success
+                                
+                                if 'api_key' in st.session_state and st.session_state.api_key:
+                                    # Perform actual cleanup
+                                    cleanup_results = cleanup_duplicate_pins(
+                                        st.session_state.api_key, 
+                                        st.session_state.current_duplicate_report,  # Use preserved report
+                                        dry_run=False
+                                    )
+                                    
+                                    # Verify cleanup was successful
+                                    with st.spinner("Verifying cleanup success..."):
+                                        verification_success, verification_report = verify_cleanup_success(
+                                            st.session_state.api_key, 
+                                            cleanup_results
+                                        )
+                                    
+                                    # Store results for display
+                                    st.session_state.cleanup_results = cleanup_results
+                                    st.session_state.cleanup_verification = {
+                                        'success': verification_success,
+                                        'report': verification_report
+                                    }
+                                    
+                                    # Clear confirmation dialog
+                                    del st.session_state.show_delete_confirmation
+                                    st.rerun()
+                                else:
+                                    st.error("❌ API key not found.")
+                    
+                    with col_cancel:
+                        if st.button("❌ Cancel", type="secondary"):
+                            del st.session_state.show_delete_confirmation
+                            st.rerun()
+                
+                # Display cleanup preview results
+                if hasattr(st.session_state, 'cleanup_preview'):
+                    st.markdown("---")
+                    st.subheader("🔍 Cleanup Preview Results")
+                    
+                    preview = st.session_state.cleanup_preview
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Would Keep", preview['kept_count'])
+                    with col2:
+                        st.metric("Would Delete", preview['deleted_count'])
+                    with col3:
+                        st.metric("Monthly Savings", f"${preview['savings']:.2f}")
+                    
+                    with st.expander("📋 Detailed Preview", expanded=False):
+                        for detail in preview['details']:
+                            st.write(f"**{detail['cid'][:20]}...** ({detail['total_instances']} copies)")
+                            st.write(f"  ✅ Keep: {detail['kept_instance']['status']} - {detail['kept_instance']['created'][:10]}")
+                            st.write(f"  🗑️ Delete: {len(detail['deleted_instances'])} duplicates")
+                            st.write("---")
+                    
+                    # Add button to clear preview and try again
+                    if st.button("🔄 Clear Preview", help="Clear the preview to run it again or make changes"):
+                        del st.session_state.cleanup_preview
+                        st.rerun()
+                
+                # Display actual cleanup results
+                if hasattr(st.session_state, 'cleanup_results'):
+                    st.markdown("---")
+                    st.subheader("🎉 Cleanup Results")
+                    
+                    cleanup = st.session_state.cleanup_results
+                    verification = st.session_state.cleanup_verification
+                    
+                    if verification['success']:
+                        st.success("✅ **Cleanup completed successfully!**")
+                    else:
+                        st.error("❌ **Cleanup completed but verification failed!**")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Kept", cleanup['kept_count'])
+                    with col2:
+                        st.metric("Deleted", cleanup['deleted_count'])
+                    with col3:
+                        st.metric("Failed", cleanup['failed_deletions'])
+                    with col4:
+                        st.metric("Monthly Savings", f"${cleanup['savings']:.2f}")
+                    
+                    # Show verification details
+                    if verification['success']:
+                        st.info(f"🔍 **Verification**: All {verification['report']['verified_cids']} unique CIDs still exist")
+                    else:
+                        st.error(f"⚠️ **Warning**: {verification['report']['missing_cids']} CIDs may be missing after cleanup!")
+                        if verification['report']['missing_details']:
+                            st.write("**Missing CIDs:**")
+                            for missing in verification['report']['missing_details']:
+                                st.write(f"- {missing['cid'][:20]}...")
+                    
+                    with st.expander("📋 Detailed Results", expanded=False):
+                        for detail in cleanup['details']:
+                            st.write(f"**{detail['cid'][:20]}...** (processed {detail['total_instances']} copies)")
+                            st.write(f"  ✅ Kept: {detail['kept_instance']['request_id'][:8]}... ({detail['kept_instance']['status']})")
+                            st.write(f"  🗑️ Deleted: {len(detail['deleted_instances'])} copies")
+                            if detail['failed_deletions']:
+                                st.write(f"  ❌ Failed: {len(detail['failed_deletions'])} deletions")
+                            st.write("---")
+                    
+                    # Add button to clear results and continue
+                    if st.button("✅ Done with Cleanup", help="Clear cleanup results to continue with other operations"):
+                        del st.session_state.cleanup_results
+                        del st.session_state.cleanup_verification
+                        # Also clear the preserved duplicate report since cleanup is complete
+                        if hasattr(st.session_state, 'current_duplicate_report'):
+                            del st.session_state.current_duplicate_report
+                        st.rerun()
+            
+            # Show top duplicates
+            with st.expander("🔍 Duplicate Details", expanded=False):
+                duplicates = duplicate_report.get('details', {})
+                if duplicates:
+                    # Sort by count
+                    sorted_duplicates = sorted(duplicates.items(), key=lambda x: len(x[1]), reverse=True)[:10]
+                    
+                    for cid, instances in sorted_duplicates:
+                        st.write(f"**{cid[:20]}...** appears **{len(instances)} times**:")
+                        for i, instance in enumerate(instances, 1):
+                            status_icon = "✅" if instance['status'] == 'pinned' else "⏳"
+                            st.write(f"  {i}. {status_icon} {instance['status']} - Created: {instance['created'][:10]} - ID: {instance['request_id'][:8]}...")
+                        st.write("---")
+        else:
+            st.success("✅ **No Duplicates Found**: All pins are unique - excellent optimization!")
+    
     # Show asset status updates
     if results['assets_changed_to_pending'] > 0:
         st.warning(f"🔄 Status updated: {results['assets_changed_to_pending']} assets changed to 'pending' (need re-pinning)")
@@ -1239,8 +1457,17 @@ def display_verification_results():
             status_icon = "✅" if detail['is_pinned'] else "❌"
             st.write(f"{status_icon} {detail['cid'][:16]}... - {detail['status']}")
     
-    # Clear results after showing them
-    del st.session_state.verification_results
+    # Only clear results if no cleanup operations are in progress
+    cleanup_operations_active = (
+        hasattr(st.session_state, 'cleanup_preview') or
+        hasattr(st.session_state, 'cleanup_results') or
+        hasattr(st.session_state, 'show_delete_confirmation') or
+        hasattr(st.session_state, 'current_duplicate_report')
+    )
+    
+    if not cleanup_operations_active:
+        # Safe to clear verification results
+        del st.session_state.verification_results
 
 def verify_collection_pins(df, service_name, api_key):
     """Verify that pins are actually available on the service."""
@@ -1271,7 +1498,7 @@ def verify_collection_pins(df, service_name, api_key):
         
         if cids_to_verify:
             from utils import verify_pinned_cids
-            verified_count, total_count, details = verify_pinned_cids(
+            verified_count, total_count, details, duplicate_report = verify_pinned_cids(
                 service_name, api_key, cids_to_verify
             )
             
@@ -1336,6 +1563,7 @@ def verify_collection_pins(df, service_name, api_key):
                 'verified_count': verified_count,
                 'total_count': total_count,
                 'details': details,
+                'duplicate_report': duplicate_report,
                 'assets_changed_to_pending': assets_changed_to_pending,
                 'assets_kept_completed': assets_kept_completed,
                 'timestamp': pd.Timestamp.now().strftime("%H:%M:%S")
