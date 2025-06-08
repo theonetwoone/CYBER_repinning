@@ -234,14 +234,24 @@ def fetch_metadata_and_extract_image_cid(metadata_cid):
             if response.status_code == 200:
                 metadata = response.json()
                 
-                # Extract image CID
+                # Extract media CID - prioritize animation_url for videos, then fallback to image
+                animation_url = metadata.get('animation_url', '')
                 image_url = metadata.get('image', '')
-                if image_url.startswith('ipfs://'):
-                    image_cid = image_url.replace('ipfs://', '').split('#')[0].split('/')[0]
-                    print(f"✅ METADATA: Found image CID: {image_cid}")
-                    return image_cid, metadata
+                
+                # Check for animation_url first (videos, GIFs, etc.)
+                if animation_url and animation_url.startswith('ipfs://'):
+                    media_cid = animation_url.replace('ipfs://', '').split('#')[0].split('/')[0]
+                    print(f"✅ METADATA: Found animation CID: {media_cid} (from animation_url)")
+                    return media_cid, metadata
+                
+                # Fallback to image field
+                elif image_url and image_url.startswith('ipfs://'):
+                    media_cid = image_url.replace('ipfs://', '').split('#')[0].split('/')[0]
+                    print(f"✅ METADATA: Found image CID: {media_cid} (from image)")
+                    return media_cid, metadata
+                
                 else:
-                    print(f"⚠️ METADATA: No IPFS image found in metadata: {image_url}")
+                    print(f"⚠️ METADATA: No IPFS media found - animation_url: {animation_url}, image: {image_url}")
                     return None, metadata
                     
         except Exception as e:
@@ -268,9 +278,21 @@ def create_collection_dataframe(assets, existing_df=None):
                 'error_message': row.get('error_message')
             }
     
+    # Tracking variables for debugging
+    total_assets = len(assets)
+    deleted_assets = 0
+    no_cid_assets = 0
+    processed_assets = 0
+    
+    print(f"🔧 DEBUG: Starting to process {total_assets} assets...")
+    
     for asset in assets:
         # Skip deleted assets
         if asset.get('deleted', False):
+            deleted_assets += 1
+            asset_id = asset.get('index', 'Unknown')
+            asset_name = asset.get('params', {}).get('name', 'Unknown')
+            print(f"🔧 DEBUG: ❌ Skipping deleted asset {asset_id} ({asset_name})")
             continue
             
         asset_params = asset.get('params', {})
@@ -278,6 +300,7 @@ def create_collection_dataframe(assets, existing_df=None):
         metadata_cid = extract_cid_from_asset(asset)
         
         if metadata_cid:  # Only include assets with valid CIDs
+            processed_assets += 1
             asset_id = str(asset['index'])
             asset_name = asset_params.get('name', 'Unknown')
             asset_url = asset_params.get('url', '')
@@ -326,6 +349,25 @@ def create_collection_dataframe(assets, existing_df=None):
                     "error_message": ""
                 }
             processed_data.append(data_row)
+        else:
+            # Asset has no valid CID
+            no_cid_assets += 1
+            asset_id = asset.get('index', 'Unknown')
+            asset_name = asset_params.get('name', 'Unknown')
+            asset_url = asset_params.get('url', '')
+            reserve = asset_params.get('reserve', '')
+            print(f"🔧 DEBUG: ❌ No CID extracted for asset {asset_id} ({asset_name})")
+            print(f"    URL: {asset_url[:50] if asset_url else 'None'}...")
+            print(f"    Reserve: {'Present' if reserve else 'None'}")
+            print(f"    ARC Standard: {arc_standard}")
+    
+    # Print processing summary
+    print(f"🔧 DEBUG: Asset processing complete!")
+    print(f"    📊 Total assets found: {total_assets}")
+    print(f"    🗑️ Deleted assets skipped: {deleted_assets}")
+    print(f"    ❌ No CID extracted: {no_cid_assets}")
+    print(f"    ✅ Successfully processed: {processed_assets}")
+    print(f"    📋 Final DataFrame size: {processed_assets} rows")
     
     df = pd.DataFrame(processed_data)
     
@@ -1251,6 +1293,8 @@ def parse_wen_tools_csv(csv_content):
         asset_id_col = None
         name_col = None
         image_cid_col = None
+        metadata_cid_col = None
+        status_col = None
         
         # Map asset_id column
         for col in df_raw.columns:
@@ -1270,7 +1314,24 @@ def parse_wen_tools_csv(csv_content):
                 image_cid_col = col
                 break
         
-        print(f"🔧 DEBUG: Detected columns - asset_id: {asset_id_col}, name: {name_col}, image_cid: {image_cid_col}")
+        # Map metadata CID column (for our app exports)
+        for col in df_raw.columns:
+            if 'metadata_cid' in col.lower():
+                metadata_cid_col = col
+                break
+        
+        # Map status column (for our app exports) 
+        for col in df_raw.columns:
+            if col.lower() == 'status':
+                status_col = col
+                break
+        
+        # Detect CSV format type
+        is_our_app_format = bool(metadata_cid_col and status_col)
+        csv_format = "Cyber Skulls App Export" if is_our_app_format else "wen.tools or similar"
+        
+        print(f"🔧 DEBUG: Detected CSV format: {csv_format}")
+        print(f"🔧 DEBUG: Detected columns - asset_id: {asset_id_col}, name: {name_col}, image_cid: {image_cid_col}, metadata_cid: {metadata_cid_col}, status: {status_col}")
         
         # Validate required columns
         missing_columns = []
@@ -1289,12 +1350,25 @@ def parse_wen_tools_csv(csv_content):
         collection_types = set()
         arc_standards_found = set()  # NEW: Track ARC standards
         
-        print(f"🔧 DEBUG: Starting to process {len(df_raw)} assets and fetch metadata CIDs...")
+        # Tracking variables
+        total_csv_rows = len(df_raw)
+        skipped_empty_image = 0
+        processed_count = 0
+        metadata_fetch_failures = 0
         
-        for _, row in df_raw.iterrows():
+        if is_our_app_format:
+            print(f"🔧 DEBUG: Starting to process {total_csv_rows} CSV rows (Cyber Skulls App format - metadata already present)...")
+        else:
+            print(f"🔧 DEBUG: Starting to process {total_csv_rows} CSV rows and fetch metadata CIDs from Algorand...")
+        
+        for idx, row in df_raw.iterrows():
             # Skip rows with empty image_cid - handle string 'nan' and empty strings
             image_url = str(row.get(image_cid_col, '')).strip()
             if not image_url or image_url.lower() in ['nan', 'none', '', 'null']:
+                skipped_empty_image += 1
+                if skipped_empty_image <= 5:  # Show first 5 examples
+                    asset_id = str(row.get(asset_id_col, 'Unknown'))
+                    print(f"🔧 DEBUG: ❌ Skipping row {idx+1} (asset {asset_id}) - empty image CID")
                 continue
             
             asset_id = str(row[asset_id_col]).strip()
@@ -1326,37 +1400,48 @@ def parse_wen_tools_csv(csv_content):
                 full_ipfs_url = f"ipfs://{image_url}"
                 collection_types.add('individual_cid')
             
-            # NEW: Enhanced metadata CID fetching with ARC standard detection
+            # Handle metadata CID based on CSV format
             metadata_cid = ""
             arc_standard = "unknown"
+            existing_status = "pending"
             
-            try:
-                print(f"🔧 DEBUG: Fetching metadata CID for asset {asset_id}...")
-                from algosdk.v2client import algod
-                
-                algod_address = "https://mainnet-api.algonode.cloud"
-                algod_client = algod.AlgodClient("", algod_address)
-                
-                asset_info = algod_client.asset_info(int(asset_id))
-                asset_params = asset_info.get('params', {})
-                
-                # Detect ARC standard and extract metadata
-                arc_standard = detect_arc_standard(asset_params)
+            if is_our_app_format:
+                # Our app format - metadata already present, no need to fetch from Algorand
+                metadata_cid = str(row.get(metadata_cid_col, '')).strip()
+                existing_status = str(row.get(status_col, 'pending')).strip()
+                arc_standard = "csv_provided"  # Mark as CSV-provided
                 arc_standards_found.add(arc_standard)
-                
-                if arc_standard in ['arc19', 'arc69', 'standard_ipfs']:
-                    metadata_cid = extract_cid_from_asset({'params': asset_params, 'index': asset_id})
-                    if metadata_cid:
-                        print(f"🔧 DEBUG: ✅ Found {arc_standard.upper()} metadata CID for {asset_id}: {metadata_cid[:20]}...")
-                    else:
-                        print(f"🔧 DEBUG: ⚠️ No metadata CID found for {arc_standard.upper()} asset {asset_id}")
-                else:
-                    print(f"🔧 DEBUG: ⚠️ Unknown ARC standard for asset {asset_id}")
+                print(f"🔧 DEBUG: Using CSV metadata for asset {asset_id}: {metadata_cid[:20] if metadata_cid else 'None'}...")
+            else:
+                # wen.tools or similar format - need to fetch metadata from Algorand
+                try:
+                    print(f"🔧 DEBUG: Fetching metadata CID for asset {asset_id}...")
+                    from algosdk.v2client import algod
                     
-            except Exception as e:
-                print(f"🔧 DEBUG: ❌ Error fetching metadata for asset {asset_id}: {str(e)}")
-                metadata_cid = ""
-                arc_standard = "error"
+                    algod_address = "https://mainnet-api.algonode.cloud"
+                    algod_client = algod.AlgodClient("", algod_address)
+                    
+                    asset_info = algod_client.asset_info(int(asset_id))
+                    asset_params = asset_info.get('params', {})
+                    
+                    # Detect ARC standard and extract metadata
+                    arc_standard = detect_arc_standard(asset_params)
+                    arc_standards_found.add(arc_standard)
+                    
+                    if arc_standard in ['arc19', 'arc69', 'standard_ipfs']:
+                        metadata_cid = extract_cid_from_asset({'params': asset_params, 'index': asset_id})
+                        if metadata_cid:
+                            print(f"🔧 DEBUG: ✅ Found {arc_standard.upper()} metadata CID for {asset_id}: {metadata_cid[:20]}...")
+                        else:
+                            print(f"🔧 DEBUG: ⚠️ No metadata CID found for {arc_standard.upper()} asset {asset_id}")
+                    else:
+                        print(f"🔧 DEBUG: ⚠️ Unknown ARC standard for asset {asset_id}")
+                        
+                except Exception as e:
+                    metadata_fetch_failures += 1
+                    print(f"🔧 DEBUG: ❌ Error fetching metadata for asset {asset_id}: {str(e)}")
+                    metadata_cid = ""
+                    arc_standard = "error"
             
             print(f"🔧 DEBUG: Parsed - base_cid: {base_cid}, arc_standard: {arc_standard}, metadata_cid: {metadata_cid[:20] if metadata_cid else 'None'}...")
             
@@ -1377,16 +1462,28 @@ def parse_wen_tools_csv(csv_content):
                 "asset_id": asset_id,
                 "asset_name": asset_name,
                 "asset_url": "",
-                "arc_standard": arc_standard,  # NEW: Track ARC standard
+                "arc_standard": arc_standard,  # Track ARC standard
                 "metadata_cid": metadata_cid,
                 "image_cid": base_cid,
                 "image_file_path": file_path,
                 "full_ipfs_url": full_ipfs_url,
-                "status": "pending",
+                "status": existing_status,  # Use existing status from CSV if available
                 "repin_cid": "",
                 "error_message": ""
             }
             processed_data.append(data_row)
+            processed_count += 1
+        
+        # Print detailed processing summary
+        print(f"🔧 DEBUG: CSV processing complete!")
+        print(f"    📊 Total CSV rows: {total_csv_rows}")
+        print(f"    ❌ Skipped (empty image CID): {skipped_empty_image}")
+        if is_our_app_format:
+            print(f"    ⚡ Fast processing (metadata already in CSV): {processed_count}")
+        else:
+            print(f"    ⚠️ Metadata fetch failures: {metadata_fetch_failures}")
+        print(f"    ✅ Successfully processed: {processed_count}")
+        print(f"    📋 Final DataFrame size: {processed_count} rows")
         
         # Create DataFrame with proper dtypes
         df = pd.DataFrame(processed_data)
@@ -1418,13 +1515,17 @@ def parse_wen_tools_csv(csv_content):
             'metadata_cids_found': metadata_cids_found,
             'collection_type': collection_type,
             'collection_types_detected': list(collection_types),
-            'arc_standards_found': list(arc_standards_found),  # NEW: ARC standards info
+            'arc_standards_found': list(arc_standards_found),
             'is_directory_collection': unique_base_cids < total_assets,
             'base_cid_info': base_cid_tracker,
+            'csv_format': csv_format,  # NEW: CSV format type
+            'is_our_app_format': is_our_app_format,  # NEW: Flag for our format
             'detected_columns': {
                 'asset_id': asset_id_col,
                 'name': name_col,
-                'image_cid': image_cid_col
+                'image_cid': image_cid_col,
+                'metadata_cid': metadata_cid_col,
+                'status': status_col
             }
         }
         

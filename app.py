@@ -157,7 +157,7 @@ def main():
         # Input method selection
         input_method = st.radio(
             "Choose input method:",
-            ["Manual Entry", "Fetch from Algorand", "Upload wen.tools CSV"],
+            ["Manual Entry", "Fetch from Algorand", "Upload CSV File"],
             help="Choose how to specify your NFT collection"
         )
         
@@ -178,9 +178,11 @@ def main():
                         if error:
                             st.error(f"❌ Error: {error}")
                         else:
-                            st.success(f"✅ Found {len(assets)} assets")
+                            st.info(f"🔍 Please have patience while processing {len(assets)} assets (includes deleted and problematic assets)...")
                             collection_df = utils.create_collection_dataframe(assets, st.session_state.collection_df)
                             st.session_state.collection_df = collection_df
+                            # Show final processed count
+                            st.success(f"✅ Successfully processed {len(collection_df)} valid assets")
                             
         elif input_method == "Fetch from Algorand":
             st.markdown("#### Direct Algorand Fetch")
@@ -197,26 +199,36 @@ def main():
                         if error:
                             st.error(f"❌ Error: {error}")
                         else:
-                            st.success(f"✅ Found {len(assets)} assets")
+                            st.info(f"🔍 Please have patience while processing {len(assets)} assets (includes deleted and problematic assets)...")
                             collection_df = utils.create_collection_dataframe(assets, st.session_state.collection_df)
                             st.session_state.collection_df = collection_df
+                            # Show final processed count
+                            st.success(f"✅ Successfully processed {len(collection_df)} valid assets")
                             
-        elif input_method == "Upload wen.tools CSV":
-            st.markdown("#### Upload wen.tools CSV")
+        elif input_method == "Upload CSV File":
+            st.markdown("#### Upload CSV File")
             st.markdown("""
-            **📥 Alternative Fast Method:**
-            1. Go to [wen.tools/download-arc19-collection-data](https://www.wen.tools/download-arc19-collection-data)
-            2. Enter your collection's asset ID or creator address
-            3. Download the CSV file
-            4. Upload it below
+            **📥 Supported CSV Formats:**
             
-            ⚡ This method is much faster than fetching directly from Algorand!
+            **🏴‍☠️ CYBER SKULLS Repinner CSV** *(Fastest - Instant Processing)*
+            - Previously exported from this tool
+            - Contains both image and metadata CIDs
+            - Preserves completion status (completed/pending/failed)
+            - ⚡ **Processes instantly** - no Algorand fetching needed
+            
+            **🛠️ wen.tools CSV** *(Fast - Requires Metadata Fetch)*  
+            - Download from [wen.tools/download-arc19-collection-data](https://www.wen.tools/download-arc19-collection-data)
+            - Contains image CIDs only
+            - Tool will fetch metadata CIDs from Algorand
+            - ⏳ **Takes time** for large collections (API rate limits)
+            
+            📤 **Upload your CSV file below - format will be auto-detected:**
             """)
             
             uploaded_file = st.file_uploader(
-                "Choose CSV file from wen.tools",
+                "Choose CSV file",
                 type=['csv'],
-                help="Upload the CSV file downloaded from wen.tools"
+                help="Upload your CSV file - format will be automatically detected (CYBER SKULLS Repinner or wen.tools)"
             )
             
             if uploaded_file is not None:
@@ -233,9 +245,25 @@ def main():
                         # Read the uploaded file
                         csv_content = uploaded_file.read()
                         
+                        # Show progress info for CSV processing
+                        st.info("📋 **Step 1/2:** Analyzing CSV format and extracting CIDs...")
+                        
                         # Parse using our new function
                         from utils import parse_wen_tools_csv, analyze_collection_structure
-                        result = parse_wen_tools_csv(csv_content)
+                        
+                        # Initial format detection
+                        import io
+                        df_temp = pd.read_csv(io.StringIO(csv_content.decode('utf-8')))
+                        has_metadata_col = any('metadata_cid' in col.lower() for col in df_temp.columns)
+                        has_status_col = any(col.lower() == 'status' for col in df_temp.columns)
+                        is_our_format = has_metadata_col and has_status_col
+                        
+                        if is_our_format:
+                            with st.spinner("⚡ **Step 2/2:** Processing Cyber Skulls App format (fast - metadata already present)..."):
+                                result = parse_wen_tools_csv(csv_content)
+                        else:
+                            with st.spinner("🔍 **Step 2/2:** Fetching metadata CIDs from Algorand for complete NFT data (this may take a moment)..."):
+                                result = parse_wen_tools_csv(csv_content)
                         
                         if len(result) == 3:
                             parsed_df, error, collection_info = result
@@ -247,7 +275,18 @@ def main():
                         if error:
                             st.error(f"❌ Error parsing CSV: {error}")
                         else:
-                            st.success(f"✅ Successfully parsed {len(parsed_df)} assets from CSV")
+                            # Count how many assets have metadata CIDs
+                            metadata_count = sum(1 for _, row in parsed_df.iterrows() if row.get('metadata_cid', '').strip())
+                            st.success(f"✅ Successfully processed {len(parsed_df)} assets from CSV")
+                            
+                            # Show different info based on format
+                            if collection_info and collection_info.get('is_our_app_format'):
+                                completed_count = sum(1 for _, row in parsed_df.iterrows() if row.get('status') == 'completed')
+                                pending_count = sum(1 for _, row in parsed_df.iterrows() if row.get('status') == 'pending')
+                                st.info(f"📊 **Cyber Skulls App Format:** {len(parsed_df)} image CIDs + {metadata_count} metadata CIDs (from CSV)")
+                                st.info(f"🔄 **Status Distribution:** {completed_count} completed, {pending_count} pending")
+                            else:
+                                st.info(f"📊 **Complete NFT Data:** {len(parsed_df)} image CIDs + {metadata_count} metadata CIDs fetched from Algorand")
                             
                             # Analyze collection structure
                             strategy_type, analysis = analyze_collection_structure(parsed_df)
@@ -460,8 +499,8 @@ def main():
             api_key_input = None
             service_instructions = {
                 "4everland": {
-                    "instruction": "Get your Bearer token from [4everland.org](https://dashboard.4everland.org/) → Bucket → Create IPFS Bucket → API Keys",
-                    "placeholder": "4everland_bearer_token_here",
+                    "instruction": "1. Sign up for [4everland.org](https://dashboard.4everland.org/)\n2. Create or select an IPFS Bucket\n3. Go to the [Pinning Service page](https://dashboard.4everland.org/bucket/pinning-service)\n4. Generate and copy your **Access Token** (this is your Bearer token)",
+                    "placeholder": "4everland_access_token_here",
                     "input_type": "single"
                 },
                 "pinata": {
@@ -529,6 +568,18 @@ def main():
                                 st.success(f"✅ API key validated: {message}")
                             else:
                                 st.error(f"❌ API key validation failed: {message}")
+                    
+                    # Verify Pins button (sidebar)
+                    st.markdown("---")
+                    st.markdown("**🔍 Quick Verification:**")
+                    if st.button("🔍 Verify Pins", type="secondary", key="sidebar_verify", 
+                                help="Verify that all CIDs in your collection are properly pinned on the selected service"):
+                        if not st.session_state.collection_df.empty:
+                            verify_collection_pins(st.session_state.collection_df, selected_service, api_key_input)
+                        else:
+                            st.warning("⚠️ No collection loaded to verify.")
+                else:
+                    st.info("💡 **Tip:** Enter your API key above to unlock verification and migration features.")
 
     # Main content area
     if st.session_state.collection_df.empty:
@@ -696,6 +747,9 @@ def main():
                 if progress.get('current_asset'):
                     st.write(f"Currently processing: {progress.get('current_asset')}")
             
+            # Show verification results if available
+            display_verification_results()
+            
             # Debug panel - show after migration completed
             if hasattr(st.session_state, 'migration_just_completed') and st.session_state.migration_just_completed:
                 st.success("🎉 Migration just completed! Status updated.")
@@ -826,7 +880,7 @@ def main():
                 </div>
             </div>
             <p style="color: #666; font-family: 'VT323', monospace; font-size: 14px; margin-top: 10px;">
-                CYBER SKULLS REPINNING PROTOCOL v2.1 // OPTIMIZED FOR 4EVERLAND // CREATED BY ThΞOneTwo
+                CYBER SKULLS REPINNING PROTOCOL v2.2.0 // OPTIMIZED FOR 4EVERLAND // CREATED BY ThΞOneTwo
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -866,7 +920,15 @@ def migrate_collection(df, service_name, api_key):
         metadata_cids_to_pin = []
         for _, row in pending_assets.iterrows():
             metadata_cid = row.get('metadata_cid', '').strip()
-            if metadata_cid and metadata_cid not in metadata_cids_to_pin:
+            image_cid = row.get('image_cid', '').strip()
+            
+            # Only add metadata CID if:
+            # 1. It exists and is not empty
+            # 2. It's not already in the list
+            # 3. It's different from the image CID (avoid duplicates for ARC-69 collections)
+            if (metadata_cid and 
+                metadata_cid not in metadata_cids_to_pin and 
+                metadata_cid != image_cid):
                 metadata_cids_to_pin.append(metadata_cid)
         
         # Combine both types of CIDs for total count
@@ -1035,7 +1097,17 @@ def migrate_collection(df, service_name, api_key):
                 
                 # Check if both image and metadata (if exists) were pinned successfully
                 image_pin_result = pin_results.get(asset_image_cid, {'success': False, 'response': {'error': 'Image CID not found in results'}})
-                metadata_pin_result = pin_results.get(asset_metadata_cid, {'success': True, 'response': 'No metadata CID'}) if not asset_metadata_cid else pin_results.get(asset_metadata_cid, {'success': False, 'response': {'error': 'Metadata CID not found in results'}})
+                
+                # For metadata CID: success if no metadata CID, or if different from image CID and pinned successfully
+                if not asset_metadata_cid:
+                    # No metadata CID - consider successful
+                    metadata_pin_result = {'success': True, 'response': 'No metadata CID'}
+                elif asset_metadata_cid == asset_image_cid:
+                    # Metadata CID same as image CID (ARC-69) - use image pin result
+                    metadata_pin_result = {'success': True, 'response': 'Same as image CID'}
+                else:
+                    # Different metadata CID - check if it was pinned
+                    metadata_pin_result = pin_results.get(asset_metadata_cid, {'success': False, 'response': {'error': 'Metadata CID not found in results'}})
                 
                 # Asset is successful only if both required CIDs were pinned
                 overall_success = image_pin_result['success'] and metadata_pin_result['success']
@@ -1046,8 +1118,10 @@ def migrate_collection(df, service_name, api_key):
                     
                     # Create comprehensive success message
                     success_details = [f"Image CID: {asset_image_cid[:16]}..."]
-                    if asset_metadata_cid:
+                    if asset_metadata_cid and asset_metadata_cid != asset_image_cid:
                         success_details.append(f"Metadata CID: {asset_metadata_cid[:16]}...")
+                    elif asset_metadata_cid == asset_image_cid:
+                        success_details.append("Metadata: Same as image (ARC-69)")
                     
                     if strategy_type == "directory_based" and 'image_file_path' in row and row['image_file_path']:
                         success_details.append(f"File: {row['image_file_path']}")
@@ -1064,7 +1138,7 @@ def migrate_collection(df, service_name, api_key):
                     if not image_pin_result['success']:
                         img_error = image_pin_result['response'].get('error', 'Unknown error') if isinstance(image_pin_result['response'], dict) else str(image_pin_result['response'])
                         error_parts.append(f"Image: {img_error}")
-                    if asset_metadata_cid and not metadata_pin_result['success']:
+                    if asset_metadata_cid and asset_metadata_cid != asset_image_cid and not metadata_pin_result['success']:
                         meta_error = metadata_pin_result['response'].get('error', 'Unknown error') if isinstance(metadata_pin_result['response'], dict) else str(metadata_pin_result['response'])
                         error_parts.append(f"Metadata: {meta_error}")
                     
@@ -1135,21 +1209,65 @@ def migrate_collection(df, service_name, api_key):
         # Still try to refresh display
         st.rerun()
 
+def display_verification_results():
+    """Display verification results from session state."""
+    if not hasattr(st.session_state, 'verification_results'):
+        return
+    
+    results = st.session_state.verification_results
+    
+    # Show verification results
+    if results['verified_count'] == results['total_count']:
+        st.success(f"✅ All pins verified: {results['verified_count']}/{results['total_count']} CIDs")
+    elif results['verified_count'] > 0:
+        st.warning(f"⚠️ Partial verification: {results['verified_count']}/{results['total_count']} CIDs verified")
+    else:
+        st.error(f"❌ Verification failed: 0/{results['total_count']} CIDs found")
+    
+    # Show asset status updates
+    if results['assets_changed_to_pending'] > 0:
+        st.warning(f"🔄 Status updated: {results['assets_changed_to_pending']} assets changed to 'pending' (need re-pinning)")
+    if results['assets_kept_completed'] > 0:
+        st.success(f"✅ {results['assets_kept_completed']} assets verified as properly pinned")
+    
+    # Show verification timestamp
+    st.info(f"🕒 Verification completed at: {results['timestamp']}")
+    
+    # Show details
+    with st.expander("📋 Verification Details", expanded=True):
+        for detail in results['details']:
+            status_icon = "✅" if detail['is_pinned'] else "❌"
+            st.write(f"{status_icon} {detail['cid'][:16]}... - {detail['status']}")
+    
+    # Clear results after showing them
+    del st.session_state.verification_results
+
 def verify_collection_pins(df, service_name, api_key):
     """Verify that pins are actually available on the service."""
-    completed_assets = df[df['status'] == 'completed']
-    
-    if completed_assets.empty:
-        st.warning("⚠️ No completed pins to verify.")
+    if df.empty:
+        st.warning("⚠️ No collection data to verify.")
         return
     
     with st.spinner("🔍 Verifying pins..."):
-        # Collect CIDs to verify
+        # Collect all CIDs to verify from all assets regardless of status
         cids_to_verify = []
-        for _, row in completed_assets.iterrows():
+        
+        for _, row in df.iterrows():
+            # Collect image CIDs
+            if row.get('image_cid') and row['image_cid'].strip():
+                cids_to_verify.append(row['image_cid'].strip())
+            
+            # Collect metadata CIDs
+            if row.get('metadata_cid') and row['metadata_cid'].strip():
+                cids_to_verify.append(row['metadata_cid'].strip())
+            
+            # Also collect from repin_cid field if it exists (for backwards compatibility)
             if row.get('repin_cid') and row['repin_cid'] != "":
                 cids = [cid.strip() for cid in row['repin_cid'].split(',')]
                 cids_to_verify.extend(cids)
+        
+        # Remove duplicates while preserving order
+        cids_to_verify = list(dict.fromkeys(cids_to_verify))
         
         if cids_to_verify:
             from utils import verify_pinned_cids
@@ -1157,18 +1275,82 @@ def verify_collection_pins(df, service_name, api_key):
                 service_name, api_key, cids_to_verify
             )
             
-            if verified_count == total_count:
-                st.success(f"✅ All pins verified: {verified_count}/{total_count} CIDs")
-            elif verified_count > 0:
-                st.warning(f"⚠️ Partial verification: {verified_count}/{total_count} CIDs verified")
-            else:
-                st.error(f"❌ Verification failed: 0/{total_count} CIDs found")
+            # Create lookup for pin verification results
+            pin_status_lookup = {}
+            for detail in details:
+                pin_status_lookup[detail['cid']] = detail['is_pinned']
             
-            # Show details
-            with st.expander("📋 Verification Details"):
-                for detail in details:
-                    status_icon = "✅" if detail['is_pinned'] else "❌"
-                    st.write(f"{status_icon} {detail['cid'][:16]}... - {detail['status']}")
+            # Update asset statuses based on verification results
+            assets_changed_to_pending = 0
+            assets_kept_completed = 0
+            
+            for index, row in df.iterrows():
+                asset_image_cid = row.get('image_cid', '').strip()
+                asset_metadata_cid = row.get('metadata_cid', '').strip()
+                
+                # Determine what CIDs this asset actually has and needs
+                has_image_cid = bool(asset_image_cid)
+                has_metadata_cid = bool(asset_metadata_cid)
+                
+                # Check pinning status for CIDs that exist
+                image_pinned = True  # Default to True if no image CID exists
+                metadata_pinned = True  # Default to True if no metadata CID exists
+                
+                if has_image_cid:
+                    image_pinned = pin_status_lookup.get(asset_image_cid, False)
+                
+                if has_metadata_cid:
+                    if asset_metadata_cid == asset_image_cid:
+                        metadata_pinned = image_pinned  # Same as image CID (ARC-69)
+                    else:
+                        metadata_pinned = pin_status_lookup.get(asset_metadata_cid, False)
+                
+                # Asset is properly pinned if all its existing CIDs are pinned
+                asset_fully_pinned = image_pinned and metadata_pinned
+                
+                if asset_fully_pinned:
+                    # Keep or set as completed
+                    if st.session_state.collection_df.at[index, 'status'] != 'completed':
+                        st.session_state.collection_df.at[index, 'status'] = 'completed'
+                        st.session_state.collection_df.at[index, 'repin_cid'] = asset_image_cid
+                        st.session_state.collection_df.at[index, 'error_message'] = 'Verified as pinned'
+                    assets_kept_completed += 1
+                else:
+                    # Set to pending for re-migration
+                    st.session_state.collection_df.at[index, 'status'] = 'pending'
+                    st.session_state.collection_df.at[index, 'repin_cid'] = ''
+                    
+                    # Create detailed error message about what's not pinned
+                    error_parts = []
+                    if has_image_cid and not image_pinned:
+                        error_parts.append(f"Image CID not pinned: {asset_image_cid[:16]}...")
+                    if has_metadata_cid and asset_metadata_cid != asset_image_cid and not metadata_pinned:
+                        error_parts.append(f"Metadata CID not pinned: {asset_metadata_cid[:16]}...")
+                    
+                    error_message = "; ".join(error_parts) if error_parts else "CID verification failed"
+                    st.session_state.collection_df.at[index, 'error_message'] = f"Pin verification failed: {error_message}"
+                    assets_changed_to_pending += 1
+            
+            # Store verification results in session state for display after rerun
+            st.session_state.verification_results = {
+                'verified_count': verified_count,
+                'total_count': total_count,
+                'details': details,
+                'assets_changed_to_pending': assets_changed_to_pending,
+                'assets_kept_completed': assets_kept_completed,
+                'timestamp': pd.Timestamp.now().strftime("%H:%M:%S")
+            }
+            
+            # Force DataFrame refresh
+            st.session_state.collection_df = st.session_state.collection_df.copy(deep=True)
+            
+            # Rerun to refresh the display with updated statuses
+            if assets_changed_to_pending > 0 or assets_kept_completed > 0:
+                st.rerun()
+            else:
+                # If no status changes, show results immediately
+                display_verification_results()
+                
         else:
             st.warning("⚠️ No CIDs found to verify.")
 
