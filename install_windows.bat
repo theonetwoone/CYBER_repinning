@@ -56,7 +56,7 @@ cd /d "%INSTALL_DIR%"
 
 :: Install Python requirements
 echo [INFO] Installing Python dependencies...
-pip install streamlit pandas requests base58 py-algorand-sdk multibase
+pip install streamlit pandas requests base58 py-algorand-sdk py-multibase
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to install Python dependencies
     pause

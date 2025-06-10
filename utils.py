@@ -1129,7 +1129,8 @@ def pin_asset_cids(service_name, api_key, metadata_cid, image_cid=None):
 
 def verify_pinned_cids(service_name, api_key, cids_to_check):
     """
-    Verify that CIDs are actually pinned on the service.
+    Memory-efficient verification for hosted deployment.
+    Streams through pins without accumulating in memory.
     Returns: (verified_count, total_count, details, duplicate_report)
     """
     if not cids_to_check:
@@ -1139,51 +1140,10 @@ def verify_pinned_cids(service_name, api_key, cids_to_check):
     details = []
     duplicate_report = None
     
-    # For 4everland, optimize by fetching all pins once and checking locally
+    # For 4everland, use memory-efficient streaming verification
     if service_name.split(" ")[0].lower() == "4everland":
-        print(f"DEBUG VERIFICATION: Optimizing 4everland verification for {len(cids_to_check)} CIDs...")
-        pin_lookup, duplicate_report = _get_4everland_pin_lookup(api_key)
-        
-        if pin_lookup is not None:
-            print(f"DEBUG VERIFICATION: Starting CID verification against lookup...")
-            
-            for i, cid in enumerate(cids_to_check):
-                # Progress feedback every 100 CIDs
-                if i % 100 == 0:
-                    print(f"DEBUG VERIFICATION: Checking CID {i+1}/{len(cids_to_check)} ({(i+1)/len(cids_to_check)*100:.1f}%)")
-                
-                if cid in pin_lookup:
-                    status = pin_lookup[cid]
-                    valid_statuses = ['pinned', 'queued', 'pinning', 'processing']
-                    is_pinned = status in valid_statuses
-                    details.append({
-                        'cid': cid,
-                        'is_pinned': is_pinned,
-                        'status': f"Status: {status}"
-                    })
-                    if is_pinned:
-                        verified_count += 1
-                else:
-                    details.append({
-                        'cid': cid,
-                        'is_pinned': False,
-                        'status': "Not found in completed pins (may be pending/processing)"
-                    })
-            
-            print(f"DEBUG VERIFICATION: CID verification complete - {verified_count}/{len(cids_to_check)} verified")
-            
-        else:
-            # Fallback to individual checks if bulk fetch failed
-            print("DEBUG VERIFICATION: Bulk fetch failed, falling back to individual checks...")
-            for cid in cids_to_check:
-                is_pinned, status_info = check_pin_status(service_name, api_key, cid)
-                details.append({
-                    'cid': cid,
-                    'is_pinned': is_pinned,
-                    'status': status_info
-                })
-                if is_pinned:
-                    verified_count += 1
+        print(f"🔍 VERIFICATION: Streaming verification for {len(cids_to_check)} CIDs (deployment-safe)...")
+        verified_count, details, duplicate_report = _stream_verify_cids(api_key, cids_to_check)
     else:
         # For other services, use individual checks
         for cid in cids_to_check:
@@ -1197,6 +1157,328 @@ def verify_pinned_cids(service_name, api_key, cids_to_check):
                 verified_count += 1
     
     return verified_count, len(cids_to_check), details, duplicate_report
+
+def get_full_duplicate_report_for_cleanup(api_key):
+    """
+    Generate a comprehensive duplicate report suitable for cleanup operations.
+    This is the memory-heavy operation that should only be run when needed.
+    """
+    print("🔍 DUPLICATE SCAN: Generating comprehensive duplicate report for cleanup...")
+    print("⚠️ WARNING: This will fetch ALL pins and may take several minutes for large accounts")
+    
+    # Use the existing comprehensive duplicate detection
+    return _get_4everland_pin_lookup_with_duplicates(api_key)
+
+def _stream_verify_cids(api_key, cids_to_check):
+    """
+    Memory-efficient streaming verification with duplicate detection.
+    Processes pins page by page without accumulating in memory.
+    """
+    import gc
+    
+    # Convert to set for fast O(1) lookup
+    cids_set = set(cids_to_check)
+    found_cids = {}  # cid -> status
+    duplicate_counts = {}  # cid -> count (for duplicate detection)
+    
+    try:
+        url = "https://api.4everland.dev/pins"
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        print(f"🔍 VERIFICATION: Starting memory-efficient streaming...")
+        
+        page_size = 2000
+        offset = 0
+        pages_processed = 0
+        start_time = time.time()
+        max_time = 300  # 5 minutes max (increased for large accounts)
+        
+        # Dynamic page limit based on collection size
+        if len(cids_to_check) <= 500:
+            max_pages = 50    # Small collections
+        elif len(cids_to_check) <= 1000:
+            max_pages = 100   # Medium collections  
+        elif len(cids_to_check) <= 2500:
+            max_pages = 250   # Large collections (like yours)
+        else:
+            max_pages = 500   # Huge collections
+            
+        print(f"🔍 VERIFICATION: Using {max_pages} page limit for {len(cids_to_check)} CIDs")
+        
+        while pages_processed < max_pages and len(found_cids) < len(cids_set):
+            # Time safety check
+            if time.time() - start_time > max_time:
+                print(f"🔍 VERIFICATION: Time limit reached for deployment safety")
+                break
+            
+            params = {
+                'limit': page_size,
+                'offset': offset
+            }
+            
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    results = data.get('results', [])
+                    
+                    if not results:
+                        print(f"🔍 VERIFICATION: Reached end of pins")
+                        break
+                    
+                    # Process this page immediately (memory efficient!)
+                    page_found = 0
+                    for pin in results:
+                        pin_cid = pin.get('pin', {}).get('cid', '')
+                        if pin_cid in cids_set:
+                            status = pin.get('status', 'unknown')
+                            
+                            # Track for verification (first occurrence wins for status)
+                            if pin_cid not in found_cids:
+                                found_cids[pin_cid] = status
+                                page_found += 1
+                            
+                            # Track for duplicate detection (count all occurrences)
+                            if pin_cid not in duplicate_counts:
+                                duplicate_counts[pin_cid] = 0
+                            duplicate_counts[pin_cid] += 1
+                    
+                    pages_processed += 1
+                    offset += len(results)
+                    
+                    # Progress update
+                    if pages_processed % 10 == 0:
+                        print(f"🔍 VERIFICATION: Processed {pages_processed} pages, found {len(found_cids)}/{len(cids_set)} CIDs")
+                    
+                    # Early exit if we found everything we need
+                    if len(found_cids) >= len(cids_set):
+                        print(f"🔍 VERIFICATION: Found all CIDs! Stopping early at page {pages_processed}")
+                        break
+                    
+                    # If we got fewer results than requested, we've reached the end
+                    if len(results) < page_size:
+                        print(f"🔍 VERIFICATION: Reached end at page {pages_processed}")
+                        break
+                    
+                    # Memory cleanup every few pages
+                    if pages_processed % 20 == 0:
+                        gc.collect()
+                    
+                    # Rate limiting
+                    time.sleep(0.1)
+                    
+                elif response.status_code == 401:
+                    print("🔍 VERIFICATION: Authentication failed")
+                    break
+                elif response.status_code == 429:
+                    print("🔍 VERIFICATION: Rate limited, waiting...")
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"🔍 VERIFICATION: API error HTTP {response.status_code}")
+                    break
+                    
+            except Exception as e:
+                print(f"🔍 VERIFICATION: Request error: {str(e)[:50]}...")
+                break
+        
+        print(f"🔍 VERIFICATION: Streaming complete - found {len(found_cids)}/{len(cids_set)} CIDs in {pages_processed} pages")
+        
+        # Check for missing CIDs and do individual lookups if needed
+        missing_cids = [cid for cid in cids_to_check if cid not in found_cids]
+        
+        if missing_cids and pages_processed >= max_pages:
+            print(f"🔍 VERIFICATION: Individual lookup for {len(missing_cids)} missing CIDs (hit page limit)...")
+            individual_results = _individual_lookup_limited(api_key, missing_cids)
+            
+            # Merge individual results
+            for cid, (is_pinned, status) in individual_results.items():
+                if is_pinned:
+                    found_cids[cid] = status
+        
+        # Build results
+        verified_count = 0
+        details = []
+        
+        for cid in cids_to_check:
+            if cid in found_cids:
+                status = found_cids[cid]
+                valid_statuses = ['pinned', 'queued', 'pinning', 'processing']
+                is_pinned = status in valid_statuses
+                
+                # Add duplicate info if found
+                dup_info = ""
+                if cid in duplicate_counts and duplicate_counts[cid] > 1:
+                    dup_info = f" (DUPLICATE: {duplicate_counts[cid]} copies!)"
+                
+                details.append({
+                    'cid': cid,
+                    'is_pinned': is_pinned,
+                    'status': f"Status: {status}{dup_info}"
+                })
+                if is_pinned:
+                    verified_count += 1
+            else:
+                # Not found anywhere
+                details.append({
+                    'cid': cid,
+                    'is_pinned': False,
+                    'status': f"Not found in {pages_processed} pages ({pages_processed * page_size:,} pins) + individual checks"
+                })
+        
+        # Create duplicate report if duplicates found
+        duplicate_report = None
+        duplicates_found = sum(1 for count in duplicate_counts.values() if count > 1)
+        if duplicates_found > 0:
+            total_waste = sum(count - 1 for count in duplicate_counts.values() if count > 1)
+            print(f"🔍 VERIFICATION: Found {duplicates_found} CIDs with duplicates ({total_waste} unnecessary copies)")
+            
+            # Create partial duplicate report for the CIDs we checked
+            duplicate_report = {
+                'total_pins': pages_processed * page_size,  # Approximate
+                'unique_cids': len(found_cids),
+                'duplicate_cids': duplicates_found,
+                'total_duplicates': total_waste,
+                'details': {},  # Will need full scan for cleanup details
+                'partial': True  # Flag that this is not a complete scan
+            }
+        
+        # Final cleanup
+        gc.collect()
+        return verified_count, details, duplicate_report
+        
+    except Exception as e:
+        print(f"🔍 VERIFICATION: Streaming failed: {str(e)[:50]}...")
+        # Ultra-safe fallback - just check a few individually
+        return _safe_individual_fallback(api_key, cids_to_check[:50])
+
+def _individual_lookup_limited(api_key, cids_to_check):
+    """
+    Limited individual lookup for missing CIDs after streaming.
+    More targeted than the full fallback.
+    """
+    results = {}
+    
+    # Dynamic individual limit based on number of missing CIDs
+    if len(cids_to_check) <= 100:
+        max_individual = len(cids_to_check)  # Check all if small
+    elif len(cids_to_check) <= 500:
+        max_individual = min(len(cids_to_check), 300)  # Most if medium
+    else:
+        max_individual = min(len(cids_to_check), 500)  # Large limit for big collections
+        
+    print(f"🔍 VERIFICATION: Individual limit set to {max_individual} for {len(cids_to_check)} missing CIDs")
+    
+    print(f"🔍 VERIFICATION: Individual checks for {min(len(cids_to_check), max_individual)} CIDs...")
+    
+    for i, cid in enumerate(cids_to_check[:max_individual]):
+        try:
+            # Check recent pins for this specific CID
+            url = "https://api.4everland.dev/pins"
+            headers = {'Authorization': f'Bearer {api_key}'}
+            response = requests.get(url, headers=headers, params={'limit': 200}, timeout=8)
+            
+            if response.status_code == 200:
+                data = response.json()
+                pins = data.get('results', [])
+                
+                # Look for this specific CID
+                for pin in pins:
+                    if pin.get('pin', {}).get('cid', '') == cid:
+                        status = pin.get('status', 'unknown')
+                        valid_statuses = ['pinned', 'queued', 'pinning', 'processing']
+                        is_pinned = status in valid_statuses
+                        results[cid] = (is_pinned, status)
+                        break
+                
+                # If not found in recent, mark as not found
+                if cid not in results:
+                    results[cid] = (False, "Not in recent pins")
+            else:
+                results[cid] = (False, f"API error: HTTP {response.status_code}")
+                
+        except Exception as e:
+            results[cid] = (False, f"Error: {str(e)[:30]}...")
+        
+        # Rate limiting
+        if i % 10 == 0 and i > 0:
+            time.sleep(0.5)
+    
+    # Mark remaining CIDs as not checked due to limits
+    for cid in cids_to_check[max_individual:]:
+        results[cid] = (False, "Not checked (individual limit reached)")
+    
+    return results
+
+def _safe_individual_fallback(api_key, cids_to_check):
+    """Ultra-safe fallback with strict limits for deployment reliability."""
+    verified_count = 0
+    details = []
+    
+    print(f"🔍 VERIFICATION: Safe fallback for {len(cids_to_check)} CIDs")
+    
+    for i, cid in enumerate(cids_to_check):
+        if i >= 50:  # Hard limit for safety
+            details.append({
+                'cid': cid,
+                'is_pinned': False,
+                'status': "Not checked (safety limit)"
+            })
+            continue
+            
+        try:
+            # Simple recent pin check
+            url = "https://api.4everland.dev/pins"
+            headers = {'Authorization': f'Bearer {api_key}'}
+            response = requests.get(url, headers=headers, params={'limit': 100}, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get('results', [])
+                found = False
+                
+                for pin in results:
+                    if pin.get('pin', {}).get('cid', '') == cid:
+                        status = pin.get('status', 'unknown')
+                        valid_statuses = ['pinned', 'queued', 'pinning', 'processing']
+                        is_pinned = status in valid_statuses
+                        details.append({
+                            'cid': cid,
+                            'is_pinned': is_pinned,
+                            'status': f"Status: {status}"
+                        })
+                        if is_pinned:
+                            verified_count += 1
+                        found = True
+                        break
+                
+                if not found:
+                    details.append({
+                        'cid': cid,
+                        'is_pinned': False,
+                        'status': "Not found in recent pins"
+                    })
+            else:
+                details.append({
+                    'cid': cid,
+                    'is_pinned': False,
+                    'status': f"API error: HTTP {response.status_code}"
+                })
+                
+        except Exception as e:
+            details.append({
+                'cid': cid,
+                'is_pinned': False,
+                'status': f"Error: {str(e)[:30]}..."
+            })
+        
+        time.sleep(0.2)  # Rate limiting
+    
+    return verified_count, details
 
 def check_pin_status(service_name, api_key, cid):
     """
@@ -2413,44 +2695,47 @@ def cleanup_duplicate_pins(api_key, duplicate_report, dry_run=True):
 def verify_cleanup_success(api_key, cleanup_results):
     """
     Verify that cleanup was successful and all unique CIDs still exist.
+    Uses memory-safe streaming approach instead of loading all pins.
     Returns: (success, verification_report)
     """
     print(f"\n🔍 VERIFYING CLEANUP SUCCESS...")
     
-    # Get fresh pin lookup after cleanup
-    pin_lookup, _ = _get_4everland_pin_lookup(api_key)
+    # Extract CIDs that should still exist after cleanup
+    cids_to_verify = [detail['cid'] for detail in cleanup_results['details']]
     
-    if not pin_lookup:
-        return False, {'error': 'Failed to fetch updated pin list for verification'}
+    if not cids_to_verify:
+        print("   ℹ️  No CIDs to verify from cleanup results")
+        return True, {'success': True, 'verified_cids': 0, 'missing_cids': 0}
+    
+    print(f"   • Verifying {len(cids_to_verify)} CIDs still exist after cleanup...")
+    
+    # Use memory-safe streaming verification
+    verified_count, total_cids, details, _ = _stream_verify_cids(api_key, cids_to_verify)
     
     verification_results = {
-        'success': True,
-        'verified_cids': 0,
-        'missing_cids': 0,
+        'success': verified_count == total_cids,
+        'verified_cids': verified_count,
+        'missing_cids': total_cids - verified_count,
         'missing_details': [],
         'verified_details': []
     }
     
-    # Check that each cleaned CID still has at least one pin
-    for cid_detail in cleanup_results['details']:
-        cid = cid_detail['cid']
-        
-        if cid in pin_lookup:
-            print(f"   ✅ {cid[:20]}... still pinned (status: {pin_lookup[cid]})")
-            verification_results['verified_cids'] += 1
+    # Build detailed results
+    for cid in cids_to_verify:
+        if cid in details:
+            status = details[cid]['status']
+            print(f"   ✅ {cid[:20]}... still pinned (status: {status})")
             verification_results['verified_details'].append({
                 'cid': cid,
-                'current_status': pin_lookup[cid],
-                'kept_instance': cid_detail['kept_instance']['request_id']
+                'current_status': status,
+                'kept_instance': next(d['kept_instance']['request_id'] for d in cleanup_results['details'] if d['cid'] == cid)
             })
         else:
             print(f"   ❌ {cid[:20]}... MISSING - cleanup may have failed!")
-            verification_results['success'] = False
-            verification_results['missing_cids'] += 1
             verification_results['missing_details'].append({
                 'cid': cid,
-                'kept_instance': cid_detail['kept_instance']['request_id'],
-                'deleted_count': len(cid_detail['deleted_instances'])
+                'kept_instance': next(d['kept_instance']['request_id'] for d in cleanup_results['details'] if d['cid'] == cid),
+                'deleted_count': next(len(d['deleted_instances']) for d in cleanup_results['details'] if d['cid'] == cid)
             })
     
     print(f"\n📋 VERIFICATION RESULTS:")
