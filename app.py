@@ -764,26 +764,43 @@ def main():
         # Collection data table
         st.markdown("### 📋 Collection Assets")
         
-        # Show different columns based on input method
+        # Show different columns based on input method and include arc_standard info
         if df['image_cid'].notna().any() and df['metadata_cid'].eq('').all():
-            # wen.tools CSV format - show image CIDs
-            display_columns = ['asset_id', 'asset_name', 'image_cid', 'status']
+            # wen.tools CSV format - show image CIDs and ARC standard
+            display_columns = ['asset_id', 'asset_name', 'image_cid', 'arc_standard', 'status']
             column_config = {
                 'asset_id': st.column_config.TextColumn('Asset ID', width="medium"),
                 'asset_name': st.column_config.TextColumn('Name', width="large"), 
                 'image_cid': st.column_config.TextColumn('Image CID', width="large"),
+                'arc_standard': st.column_config.TextColumn('Type', width="small", help="ARC standard detected or processing status"),
                 'status': st.column_config.TextColumn('Status', width="small")
             }
         else:
-            # Direct Algorand fetch format - show metadata and image CIDs
-            display_columns = ['asset_id', 'asset_name', 'metadata_cid', 'image_cid', 'status']
+            # Direct Algorand fetch format or our app format - show metadata and image CIDs
+            display_columns = ['asset_id', 'asset_name', 'metadata_cid', 'image_cid', 'arc_standard', 'status']
             column_config = {
                 'asset_id': st.column_config.TextColumn('Asset ID', width="small"),
                 'asset_name': st.column_config.TextColumn('Name', width="medium"),
                 'metadata_cid': st.column_config.TextColumn('Metadata CID', width="large"),
                 'image_cid': st.column_config.TextColumn('Image CID', width="large"),
+                'arc_standard': st.column_config.TextColumn('Type', width="small", help="ARC standard detected or processing status"),
                 'status': st.column_config.TextColumn('Status', width="small")
             }
+        
+        # Add helpful info about arc_standard values
+        with st.expander("ℹ️ Understanding Asset Types"):
+            st.markdown("""
+            **Asset Type Explanations:**
+            - **`arc19`**: ARC-19 standard NFT with template-based metadata
+            - **`arc69`**: ARC-69 standard NFT with reserve field metadata  
+            - **`standard_ipfs`**: Standard IPFS URL format
+            - **`image_only`**: ✅ **Valid asset** - Image CID available, metadata missing (can still be pinned!)
+            - **`csv_provided`**: Metadata already provided in CSV file
+            - **`error`**: Failed to fetch metadata from Algorand
+            - **`unknown`**: Unable to determine ARC standard
+            
+            💡 **Note:** Assets marked as `image_only` are perfectly fine to pin! They have valid image CIDs but missing metadata. This is common with some collections.
+            """)
         
         st.dataframe(
             df[display_columns], 

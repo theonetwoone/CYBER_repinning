@@ -864,12 +864,35 @@ def _pin_with_infura(api_key_tuple, cid_to_pin):
 def pin_asset_cids(service_name, api_key, metadata_cid, image_cid=None):
     """
     Pin both metadata and image CIDs for an asset.
+    Handles "image_only" assets that don't have metadata CIDs.
     Returns: (success: bool, results: dict)
     """
     results = {
         'metadata': {'success': False, 'response': None},
         'image': {'success': False, 'response': None}
     }
+    
+    # Handle image-only assets (no metadata CID)
+    if not metadata_cid or metadata_cid.strip() == "":
+        if image_cid:
+            print(f"📌 PINNING: Image-only asset - Image CID: {image_cid}")
+            success, response = pin_cid(service_name, api_key, image_cid)
+            results['image'] = {'success': success, 'response': response}
+            print(f"📌 IMAGE-ONLY RESULT: Success={success}, Response={response}")
+            
+            return success, {
+                'summary': f"Image CID pinned successfully (no metadata)" if success else f"Failed to pin image CID: {response}",
+                'results': results,
+                'metadata_cid': "",
+                'image_cid': image_cid
+            }
+        else:
+            return False, {
+                'summary': "No CIDs to pin (missing both metadata and image CIDs)",
+                'results': results,
+                'metadata_cid': "",
+                'image_cid': ""
+            }
     
     # Pin metadata CID
     print(f"📌 PINNING: Metadata CID: {metadata_cid}")
@@ -1631,6 +1654,12 @@ def parse_wen_tools_csv(csv_content):
                 full_ipfs_url = image_url
                 ipfs_path = image_url.replace('ipfs://', '')
                 
+                # Handle ARC-19 fragment notation (e.g., "cid#i" or "cid#arc") 
+                # This fixes parsing for URLs like "ipfs://bafybei...#i"
+                if '#' in ipfs_path:
+                    ipfs_path = ipfs_path.split('#')[0]  # Remove fragment like "#i"
+                    print(f"🔧 DEBUG: Cleaned fragment from IPFS path: {ipfs_path[:20]}...")
+                
                 if '/' in ipfs_path:
                     parts = ipfs_path.split('/')
                     base_cid = parts[0]
@@ -1641,7 +1670,9 @@ def parse_wen_tools_csv(csv_content):
                     file_path = ""
                     collection_types.add('individual_cid')
             else:
-                base_cid = image_url
+                # Handle bare CID with possible fragment
+                clean_cid = image_url.split('#')[0] if '#' in image_url else image_url
+                base_cid = clean_cid
                 file_path = ""
                 full_ipfs_url = f"ipfs://{image_url}"
                 collection_types.add('individual_cid')
@@ -1688,6 +1719,15 @@ def parse_wen_tools_csv(csv_content):
                     print(f"🔧 DEBUG: ❌ Error fetching metadata for asset {asset_id}: {str(e)}")
                     metadata_cid = ""
                     arc_standard = "error"
+            
+            # Improved metadata handling - don't fail assets just because metadata is missing
+            if not metadata_cid and arc_standard == "error":
+                # If metadata fetch failed but we have a valid image CID, 
+                # treat it as a valid asset that can still be pinned
+                if base_cid and len(base_cid) > 10:  # Basic CID validation
+                    arc_standard = "image_only"  # Mark as image-only asset
+                    print(f"🔧 DEBUG: ⚠️ Metadata fetch failed for {asset_id}, but image CID is valid - proceeding as image-only asset")
+                    arc_standards_found.add(arc_standard)
             
             print(f"🔧 DEBUG: Parsed - base_cid: {base_cid}, arc_standard: {arc_standard}, metadata_cid: {metadata_cid[:20] if metadata_cid else 'None'}...")
             
