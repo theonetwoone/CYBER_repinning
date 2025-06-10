@@ -76,7 +76,7 @@ If the automatic installers don't work, you can install manually:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/theonetwo-dev/cyber_repinning.git
+git clone https://github.com/theonetwoone/CYBER_repinning.git
 cd cyber_repinning
 
 # 2. Install dependencies

@@ -108,7 +108,7 @@ fi
 
 # Clone the repository
 echo -e "${YELLOW}[INFO]${NC} Cloning repository from GitHub..."
-if ! git clone https://github.com/theonetwo-dev/cyber_repinning.git "$INSTALL_DIR"; then
+if ! git clone https://github.com/theonetwoone/CYBER_repinning.git "$INSTALL_DIR"; then
     echo -e "${RED}[ERROR]${NC} Failed to clone repository"
     echo "Please check your internet connection and try again"
     exit 1

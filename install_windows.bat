@@ -43,7 +43,7 @@ if exist "%INSTALL_DIR%" (
 
 :: Clone the repository
 echo [INFO] Cloning repository from GitHub...
-git clone https://github.com/theonetwo-dev/cyber_repinning.git "%INSTALL_DIR%"
+git clone https://github.com/theonetwoone/CYBER_repinning.git "%INSTALL_DIR%"
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to clone repository
     echo Please check your internet connection and try again
