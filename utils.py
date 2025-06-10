@@ -1292,8 +1292,8 @@ def _stream_verify_cids(api_key, cids_to_check):
         missing_cids = [cid for cid in cids_to_check if cid not in found_cids]
         
         if missing_cids and pages_processed >= max_pages:
-            print(f"🔍 VERIFICATION: Individual lookup for {len(missing_cids)} missing CIDs (hit page limit)...")
-            individual_results = _individual_lookup_limited(api_key, missing_cids)
+            print(f"🔍 VERIFICATION: Multi-tier fallback for {len(missing_cids)} missing CIDs (hit page limit)...")
+            individual_results = _multi_tier_individual_fallback(api_key, missing_cids)
             
             # Merge individual results
             for cid, (is_pinned, status) in individual_results.items():
@@ -1364,12 +1364,16 @@ def _individual_lookup_limited(api_key, cids_to_check):
     results = {}
     
     # Dynamic individual limit based on number of missing CIDs
+    # Scale limit to handle what's actually needed
     if len(cids_to_check) <= 100:
         max_individual = len(cids_to_check)  # Check all if small
     elif len(cids_to_check) <= 500:
-        max_individual = min(len(cids_to_check), 300)  # Most if medium
+        max_individual = len(cids_to_check)  # Check all if medium
     else:
-        max_individual = min(len(cids_to_check), 500)  # Large limit for big collections
+        # For large collections, be more generous but still cap for safety
+        # Allow up to 80% of missing CIDs to be checked individually
+        safety_cap = max(500, min(len(cids_to_check), int(len(cids_to_check) * 0.8)))
+        max_individual = safety_cap
         
     print(f"🔍 VERIFICATION: Individual limit set to {max_individual} for {len(cids_to_check)} missing CIDs")
     
@@ -2748,3 +2752,146 @@ def verify_cleanup_success(api_key, cleanup_results):
         print("   ❌ Some CIDs may have been lost during cleanup!")
     
     return verification_results['success'], verification_results
+
+def _multi_tier_individual_fallback(api_key, cids_to_check):
+    """
+    Multi-tier fallback system for individual CID verification.
+    Uses multiple strategies progressively for better coverage.
+    """
+    results = {}
+    checked_count = 0
+    
+    # Determine safe limits based on collection size
+    if len(cids_to_check) <= 100:
+        max_checks = len(cids_to_check)
+    elif len(cids_to_check) <= 500:
+        max_checks = len(cids_to_check)
+    else:
+        # For large collections: check 80% but cap for deployment safety
+        max_checks = min(len(cids_to_check), max(500, int(len(cids_to_check) * 0.8)))
+    
+    print(f"🔍 MULTI-TIER FALLBACK: Checking {max_checks}/{len(cids_to_check)} CIDs with progressive strategies")
+    
+    # TIER 1: Recent pins search (fastest, but limited coverage)
+    print(f"   📋 TIER 1: Recent pins search (checking recent 500 pins per request)")
+    tier1_found = 0
+    for i, cid in enumerate(cids_to_check[:max_checks]):
+        if checked_count >= max_checks:
+            break
+            
+        try:
+            url = "https://api.4everland.dev/pins"
+            headers = {'Authorization': f'Bearer {api_key}'}
+            response = requests.get(url, headers=headers, params={'limit': 500}, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                pins = data.get('results', [])
+                
+                for pin in pins:
+                    if pin.get('pin', {}).get('cid', '') == cid:
+                        status = pin.get('status', 'unknown')
+                        valid_statuses = ['pinned', 'queued', 'pinning', 'processing']
+                        is_pinned = status in valid_statuses
+                        results[cid] = (is_pinned, f"Tier1: {status}")
+                        tier1_found += 1
+                        break
+                        
+            checked_count += 1
+            if i % 20 == 0 and i > 0:
+                time.sleep(0.3)  # Rate limiting
+                
+        except Exception as e:
+            results[cid] = (False, f"Tier1 error: {str(e)[:20]}...")
+            checked_count += 1
+    
+    print(f"   ✅ TIER 1: Found {tier1_found} CIDs in recent pins")
+    
+    # TIER 2: Direct CID status API (for remaining CIDs)
+    remaining_cids = [cid for cid in cids_to_check[:max_checks] if cid not in results]
+    if remaining_cids and checked_count < max_checks:
+        print(f"   🎯 TIER 2: Direct CID status check for {len(remaining_cids)} remaining CIDs")
+        tier2_found = 0
+        
+        for i, cid in enumerate(remaining_cids):
+            if checked_count >= max_checks:
+                break
+                
+            try:
+                # Use the dedicated status check function
+                is_pinned, status_info = _check_4everland_pin_status(api_key, cid)
+                results[cid] = (is_pinned, f"Tier2: {status_info}")
+                if is_pinned:
+                    tier2_found += 1
+                checked_count += 1
+                
+                if i % 10 == 0 and i > 0:
+                    time.sleep(0.5)  # More conservative rate limiting
+                    
+            except Exception as e:
+                results[cid] = (False, f"Tier2 error: {str(e)[:20]}...")
+                checked_count += 1
+        
+        print(f"   ✅ TIER 2: Found {tier2_found} additional CIDs via direct lookup")
+    
+    # TIER 3: Batch verification for final missing CIDs (if still under limits)
+    final_remaining = [cid for cid in cids_to_check[:max_checks] if cid not in results]
+    if final_remaining and checked_count < max_checks:
+        batch_size = min(len(final_remaining), max_checks - checked_count, 50)  # Safety limit
+        print(f"   🔄 TIER 3: Batch verification for final {batch_size} CIDs")
+        
+        try:
+            # Try a different API endpoint or approach
+            url = "https://api.4everland.dev/pins"
+            headers = {'Authorization': f'Bearer {api_key}'}
+            
+            tier3_found = 0
+            for cid in final_remaining[:batch_size]:
+                try:
+                    # Search by CID parameter if supported
+                    response = requests.get(url, headers=headers, 
+                                          params={'cid': cid, 'limit': 10}, timeout=8)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        pins = data.get('results', [])
+                        found = False
+                        
+                        for pin in pins:
+                            if pin.get('pin', {}).get('cid', '') == cid:
+                                status = pin.get('status', 'unknown')
+                                valid_statuses = ['pinned', 'queued', 'pinning', 'processing']
+                                is_pinned = status in valid_statuses
+                                results[cid] = (is_pinned, f"Tier3: {status}")
+                                if is_pinned:
+                                    tier3_found += 1
+                                found = True
+                                break
+                        
+                        if not found:
+                            results[cid] = (False, "Tier3: Not found in batch search")
+                    else:
+                        results[cid] = (False, f"Tier3: API error {response.status_code}")
+                        
+                    time.sleep(0.2)  # Rate limiting
+                    checked_count += 1
+                    
+                except Exception as e:
+                    results[cid] = (False, f"Tier3 error: {str(e)[:20]}...")
+                    checked_count += 1
+            
+            print(f"   ✅ TIER 3: Found {tier3_found} additional CIDs via batch search")
+            
+        except Exception as e:
+            print(f"   ❌ TIER 3: Batch search failed: {str(e)[:50]}...")
+    
+    # Mark any remaining unchecked CIDs
+    for cid in cids_to_check[max_checks:]:
+        results[cid] = (False, "Not checked (safety limit reached)")
+    
+    total_found = sum(1 for is_pinned, _ in results.values() if is_pinned)
+    total_checked = len([cid for cid in cids_to_check[:max_checks] if cid in results])
+    
+    print(f"🎯 MULTI-TIER SUMMARY: Found {total_found}/{total_checked} CIDs across all tiers")
+    
+    return results
