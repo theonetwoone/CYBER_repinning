@@ -70,10 +70,28 @@ def detect_arc_standard(asset_params):
     Returns: 'arc19', 'arc69', 'standard_ipfs', or 'unknown'
     """
     url = asset_params.get('url', '')
+    metadata_mime_type = asset_params.get('metadata_mime_type', '')
     
-    # ARC-19: Uses template-ipfs:// format
+    # ARC-19: Uses template-ipfs:// format OR has empty metadata_mime_type with CID in URL
     if url.startswith('template-ipfs://'):
         return 'arc19'
+    
+    # ARC-19 with missing/empty metadata_mime_type - treat as ARC-19 variant
+    print(f"DEBUG: Checking metadata_mime_type: '{metadata_mime_type}', type: {type(metadata_mime_type)}, not metadata_mime_type: {not metadata_mime_type}")
+    if not metadata_mime_type and url:
+        print(f"DEBUG: metadata_mime_type is falsy and URL exists: '{url[:50] if url else 'None'}...'")
+        # Check if URL contains a direct CID or IPFS URL
+        if (any(url.startswith(prefix) for prefix in ['Qm', 'bafy', 'bafk', 'bafz']) or 
+            url.startswith('ipfs://')):
+            print(f"DEBUG: Detected ARC-19 with empty metadata_mime_type: {url[:30]}...")
+            return 'arc19'
+        else:
+            print(f"DEBUG: URL doesn't start with expected CID/IPFS patterns: '{url[:30]}...'")
+    else:
+        if not url:
+            print(f"DEBUG: No URL found")
+        if metadata_mime_type:
+            print(f"DEBUG: metadata_mime_type is not empty: '{metadata_mime_type}'")
     
     # ARC-69: Has metadata in the 'am-' reserve field and may use standard IPFS URLs
     # Check for ARC-69 metadata field (base64 encoded JSON in reserve)
@@ -88,9 +106,17 @@ def detect_arc_standard(asset_params):
         except:
             pass
     
-    # Standard IPFS URL
+    # Standard IPFS URL - check if it contains a valid CID pattern
     if url.startswith('ipfs://'):
         return 'standard_ipfs'
+    
+    # Special case: Check if there's a CID-like string in the URL but missing metadata_mime_type
+    # This handles cases where assets have CIDs in URL field but might be malformed
+    if url and len(url) > 20:  # Basic check for CID-like content
+        # Check for common CID patterns (Qm... or bafy...)
+        if any(url.startswith(prefix) for prefix in ['Qm', 'bafy', 'bafk', 'bafz']):
+            print(f"DEBUG: Found CID-like pattern in URL but no standard prefix: {url[:30]}...")
+            return 'potential_cid'
     
     return 'unknown'
 
@@ -106,15 +132,25 @@ def extract_cid_from_asset(asset):
         asset_params = asset['params']
         arc_standard = detect_arc_standard(asset_params)
         
-        print(f"DEBUG: Asset {asset.get('index', 'Unknown')} detected as {arc_standard}")
+        asset_id = asset.get('index', 'Unknown')
+        metadata_mime_type = asset_params.get('metadata_mime_type', '')
+        print(f"DEBUG: Asset {asset_id} detected as {arc_standard}")
+        if arc_standard == 'arc19' and not metadata_mime_type:
+            print(f"DEBUG: Asset {asset_id} is ARC-19 with empty metadata_mime_type - will use fallback logic")
         
         if arc_standard == 'arc19':
-            return extract_arc19_cid(asset_params)
+            print(f"DEBUG: Calling extract_arc19_cid for asset {asset_id}")
+            result = extract_arc19_cid(asset_params)
+            print(f"DEBUG: extract_arc19_cid returned: {result}")
+            return result
         elif arc_standard == 'arc69':
             return extract_arc69_cid(asset_params)
         elif arc_standard == 'standard_ipfs':
             return extract_standard_ipfs_cid(asset_params)
+        elif arc_standard == 'potential_cid':
+            return extract_potential_cid(asset_params)
         
+        print(f"DEBUG: No matching ARC standard for asset {asset_id}, arc_standard: {arc_standard}")
         return None
         
     except Exception as e:
@@ -126,13 +162,48 @@ def extract_arc19_cid(asset_params):
     try:
         url = asset_params.get('url', '')
         if not url:
+            print(f"DEBUG ARC19: ❌ No URL found in asset params")
             return None
             
+        print(f"DEBUG ARC19: Parsing URL: {url}")
+        metadata_mime_type = asset_params.get('metadata_mime_type', '')
+        print(f"DEBUG ARC19: metadata_mime_type = '{metadata_mime_type}' (empty: {not metadata_mime_type})")
+        
+        # First, try to parse as ARC19 template format (regardless of metadata_mime_type)
         # Parse ARC19 template format
-        pattern = re.compile(r"template-ipfs://\{ipfscid:(?P<version>\d+):(?P<codec>\w+):(?P<field>\w+):(?P<hash_type>[\w-]+)\}")
+        pattern = re.compile(r"template-ipfs://\{ipfscid:(?P<version>\d+):(?P<codec>[\w-]+):(?P<field>\w+):(?P<hash_type>[\w-]+)\}")
         match = pattern.match(url)
         
         if not match:
+            print(f"DEBUG ARC19: ❌ URL does not match ARC19 template pattern")
+            print(f"DEBUG ARC19: Expected format: template-ipfs://{{ipfscid:version:codec:field:hash_type}}")
+            
+            # Fallback: check if it's a direct CID or IPFS URL (only if metadata_mime_type is missing)
+            if not metadata_mime_type:
+                print(f"DEBUG ARC19: 🔄 Fallback for missing metadata_mime_type: checking for direct CID")
+                
+                if any(url.startswith(prefix) for prefix in ['Qm', 'bafy', 'bafk', 'bafz']):
+                    print(f"DEBUG ARC19: ✅ Fallback: Found direct CID in URL: {url}")
+                    return url.strip()
+                elif url.startswith('ipfs://'):
+                    cid_part = url.replace('ipfs://', '').split('#')[0].split('/')[0]
+                    print(f"DEBUG ARC19: ✅ Fallback: Found IPFS CID in URL: {cid_part}")
+                    return cid_part
+                elif url and len(url) > 10:
+                    # More aggressive fallback - check if it could be any kind of CID
+                    url_clean = url.strip()
+                    print(f"DEBUG ARC19: 🔍 Fallback: Checking if URL could be a CID: '{url_clean}'")
+                    
+                    # Check if it looks like a base58 CID (Qm...) or base32 CID (bafy...)
+                    if (url_clean.startswith('Qm') and len(url_clean) >= 46) or \
+                       (url_clean.startswith(('bafy', 'bafk', 'bafz', 'bafr')) and len(url_clean) >= 50):
+                        print(f"DEBUG ARC19: ✅ Fallback: URL appears to be a direct CID: {url_clean}")
+                        return url_clean
+                    else:
+                        print(f"DEBUG ARC19: ❌ Fallback: URL doesn't appear to be a direct CID")
+                else:
+                    print(f"DEBUG ARC19: ❌ Fallback: URL is too short or empty for CID: '{url}'")
+            
             return None
         
         # Extract template parameters
@@ -142,16 +213,35 @@ def extract_arc19_cid(asset_params):
         cid_codec = params['codec']
         hash_type = params['hash_type']
         
+        print(f"DEBUG ARC19: Template params - version: {cid_version}, codec: {cid_codec}, field: {field_to_get}, hash: {hash_type}")
+        
+        # Print all available asset parameters for debugging
+        available_fields = list(asset_params.keys())
+        print(f"DEBUG ARC19: Available asset fields: {available_fields}")
+        
         # Get address from the correct field
         address_to_decode = asset_params.get(field_to_get)
         if not address_to_decode:
+            print(f"DEBUG ARC19: ❌ Field '{field_to_get}' not found in asset params")
+            print(f"DEBUG ARC19: Available fields: {[k for k in asset_params.keys() if k in ['reserve', 'manager', 'freezer', 'clawback']]}")
+            
+            # Check if the field exists but is empty
+            if field_to_get in asset_params:
+                print(f"DEBUG ARC19: Field '{field_to_get}' exists but is empty/None")
+            
             return None
         
         print(f"DEBUG ARC19: Field: {field_to_get}, Address: {address_to_decode}")
         
+        # Additional validation for address format
+        if len(address_to_decode) < 10:
+            print(f"DEBUG ARC19: ❌ Address too short: {len(address_to_decode)} characters")
+            return None
+        
         # Decode using algosdk
         try:
             decoded_address = algosdk.encoding.decode_address(address_to_decode)
+            print(f"DEBUG ARC19: ✅ Successfully decoded address using algosdk")
             print(f"DEBUG ARC19: Decoded address bytes: {decoded_address.hex()}")
             
             # Construct CID based on version
@@ -166,30 +256,57 @@ def extract_arc19_cid(asset_params):
                 
                 cid_bytes = bytes([0x01, codec_byte]) + multihash
                 cid_str = multibase.encode('base32', cid_bytes).decode('ascii')
-                print(f"DEBUG ARC19: Final CID: {cid_str}")
+                print(f"DEBUG ARC19: ✅ Final CIDv1: {cid_str}")
                 return cid_str
             else:
                 cid_str = base58.b58encode(decoded_address).decode('ascii')
-                print(f"DEBUG ARC19: CIDv0: {cid_str}")
+                print(f"DEBUG ARC19: ✅ Final CIDv0: {cid_str}")
                 return cid_str
                 
         except Exception as decode_error:
-            print(f"DEBUG ARC19: Decode error: {decode_error}")
-            # Fallback method
-            padded_address = address_to_decode + '=' * (-len(address_to_decode) % 8)
-            decoded_bytes = base64.b32decode(padded_address)
+            print(f"DEBUG ARC19: ⚠️ algosdk decode failed: {decode_error}")
+            print(f"DEBUG ARC19: Trying fallback base32 decode method...")
             
-            if cid_version == 1:
-                codec_map = {'raw': 0x55, 'dag-pb': 0x70}
-                codec_byte = codec_map.get(cid_codec, 0x55)
-                cid_bytes = bytes([0x01, codec_byte]) + decoded_bytes
-                cid_b58 = base58.b58encode(cid_bytes).decode('ascii')
-                return cid_b58
-            else:
-                return base58.b58encode(decoded_bytes).decode('ascii')
+            # Fallback method with better error handling
+            try:
+                # Algorand addresses are base32 encoded, try direct base32 decode
+                padded_address = address_to_decode.upper()
+                # Add padding if needed
+                while len(padded_address) % 8 != 0:
+                    padded_address += '='
+                
+                decoded_bytes = base64.b32decode(padded_address)
+                print(f"DEBUG ARC19: ✅ Fallback decode successful: {len(decoded_bytes)} bytes")
+                
+                if cid_version == 1:
+                    codec_map = {'raw': 0x55, 'dag-pb': 0x70, 'dag-cbor': 0x71}
+                    codec_byte = codec_map.get(cid_codec, 0x55)
+                    
+                    # Use appropriate hash for CIDv1
+                    if hash_type == 'sha2-256':
+                        multihash = bytes([0x12, 0x20]) + decoded_bytes
+                    else:
+                        multihash = bytes([0x12, 0x20]) + decoded_bytes
+                    
+                    cid_bytes = bytes([0x01, codec_byte]) + multihash
+                    cid_str = multibase.encode('base32', cid_bytes).decode('ascii')
+                    print(f"DEBUG ARC19: ✅ Fallback CIDv1: {cid_str}")
+                    return cid_str
+                else:
+                    cid_str = base58.b58encode(decoded_bytes).decode('ascii')
+                    print(f"DEBUG ARC19: ✅ Fallback CIDv0: {cid_str}")
+                    return cid_str
+                    
+            except Exception as fallback_error:
+                print(f"DEBUG ARC19: ❌ Fallback decode also failed: {fallback_error}")
+                print(f"DEBUG ARC19: Address length: {len(address_to_decode)}")
+                print(f"DEBUG ARC19: Address characters: {[c for c in address_to_decode[:10]]}")
+                return None
         
     except Exception as e:
-        print(f"DEBUG ARC19: Error: {e}")
+        print(f"DEBUG ARC19: ❌ General error: {e}")
+        import traceback
+        print(f"DEBUG ARC19: Full traceback: {traceback.format_exc()}")
         return None
 
 def extract_arc69_cid(asset_params):
@@ -231,6 +348,28 @@ def extract_standard_ipfs_cid(asset_params):
         
     except Exception as e:
         print(f"DEBUG IPFS: Error: {e}")
+        return None
+
+def extract_potential_cid(asset_params):
+    """Extract CID from URL that appears to contain a raw CID."""
+    try:
+        url = asset_params.get('url', '')
+        if not url:
+            return None
+        
+        # Check if URL itself looks like a CID
+        cid_candidate = url.strip()
+        
+        # Basic CID validation - check length and starting pattern
+        if len(cid_candidate) > 10 and any(cid_candidate.startswith(prefix) for prefix in ['Qm', 'bafy', 'bafk', 'bafz']):
+            print(f"DEBUG POTENTIAL_CID: Found raw CID in URL field: {cid_candidate}")
+            print(f"DEBUG POTENTIAL_CID: Note - this asset may be missing metadata_mime_type or have non-standard format")
+            return cid_candidate
+        
+        return None
+        
+    except Exception as e:
+        print(f"DEBUG POTENTIAL_CID: Error: {e}")
         return None
 
 def fetch_metadata_and_extract_image_cid(metadata_cid):
@@ -338,13 +477,20 @@ def create_collection_dataframe(assets, existing_df=None):
                 image_cid = None
                 
                 if arc_standard == 'arc19':
-                    # For ARC-19, fetch metadata to get image CID with timeout protection
-                    print(f"🔍 ARC-19: Fetching metadata for asset {asset_id} ({asset_name}): {metadata_cid}")
-                    try:
-                        image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
-                    except Exception as metadata_error:
-                        print(f"⚠️ ARC-19: Failed to fetch metadata for {asset_id}: {metadata_error}")
-                        image_cid = None  # Continue processing without image CID
+                    # Check if this ARC-19 asset has metadata_mime_type
+                    metadata_mime_type = asset_params.get('metadata_mime_type', '')
+                    if not metadata_mime_type:
+                        # Missing metadata_mime_type - treat as ARC-69 style (CID is the image CID)
+                        image_cid = metadata_cid
+                        print(f"🔍 ARC-19 (missing metadata_mime_type): Using extracted CID as image CID for asset {asset_id}: {image_cid}")
+                    else:
+                        # Standard ARC-19: fetch metadata to get image CID with timeout protection
+                        print(f"🔍 ARC-19: Fetching metadata for asset {asset_id} ({asset_name}): {metadata_cid}")
+                        try:
+                            image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
+                        except Exception as metadata_error:
+                            print(f"⚠️ ARC-19: Failed to fetch metadata for {asset_id}: {metadata_error}")
+                            image_cid = None  # Continue processing without image CID
                 elif arc_standard == 'arc69':
                     # For ARC-69, image CID is already extracted from metadata
                     image_cid = metadata_cid  # In ARC-69, the metadata CID IS the image CID
@@ -393,6 +539,51 @@ def create_collection_dataframe(assets, existing_df=None):
                 print(f"    URL: {asset_url[:50] if asset_url else 'None'}...")
                 print(f"    Reserve: {'Present' if reserve else 'None'}")
                 print(f"    ARC Standard: {arc_standard}")
+                
+                # Provide more detailed diagnostics for different ARC standards
+                if arc_standard == 'arc19':
+                    metadata_mime_type = asset_params.get('metadata_mime_type', '')
+                    print(f"    🔍 ARC19 Diagnosis: metadata_mime_type = {'Present' if metadata_mime_type else 'MISSING'}")
+                    
+                    if asset_url and asset_url.startswith('template-ipfs://'):
+                        # Check if URL pattern is correct but field is missing
+                        import re
+                        pattern = re.compile(r"template-ipfs://\{ipfscid:(?P<version>\d+):(?P<codec>\w+):(?P<field>\w+):(?P<hash_type>[\w-]+)\}")
+                        match = pattern.match(asset_url)
+                        if match:
+                            params = match.groupdict()
+                            field_needed = params['field']
+                            field_value = asset_params.get(field_needed)
+                            if not field_value:
+                                print(f"    🔍 ARC19 Diagnosis: URL template requires field '{field_needed}' but it's missing or empty")
+                                print(f"    🔍 Available address fields: {[k for k in asset_params.keys() if k in ['reserve', 'manager', 'freezer', 'clawback']]}")
+                            else:
+                                print(f"    🔍 ARC19 Diagnosis: Field '{field_needed}' present but CID extraction failed (possibly invalid address format)")
+                        else:
+                            print(f"    🔍 ARC19 Diagnosis: URL doesn't match expected template pattern")
+                    elif any(asset_url.startswith(prefix) for prefix in ['Qm', 'bafy', 'bafk', 'bafz']) or asset_url.startswith('ipfs://'):
+                        print(f"    🔍 ARC19 Diagnosis: URL contains direct CID but extraction failed")
+                        if not metadata_mime_type:
+                            print(f"    💡 Expected: Missing metadata_mime_type should trigger fallback to treat as image CID")
+                    else:
+                        print(f"    🔍 ARC19 Diagnosis: Missing or invalid template-ipfs:// URL")
+                elif arc_standard == 'arc69':
+                    if reserve:
+                        print(f"    🔍 ARC69 Diagnosis: Reserve field present but couldn't decode/parse metadata")
+                    else:
+                        print(f"    🔍 ARC69 Diagnosis: Missing reserve field required for ARC69")
+                elif arc_standard == 'standard_ipfs':
+                    print(f"    🔍 IPFS Diagnosis: URL should start with 'ipfs://' but extraction failed")
+                elif arc_standard == 'potential_cid':
+                    print(f"    🔍 POTENTIAL_CID Diagnosis: URL contains CID-like pattern but extraction failed")
+                    print(f"    💡 Note: This might be the case mentioned 'cid was presented under url but missing metadata_mime_type'")
+                elif arc_standard == 'unknown':
+                    print(f"    🔍 General Diagnosis: Asset doesn't match any known ARC standard pattern")
+                    if asset_url:
+                        if asset_url.startswith('http'):
+                            print(f"    💡 Suggestion: Asset uses HTTP URL - not compatible with IPFS pinning")
+                        elif not any(asset_url.startswith(prefix) for prefix in ['template-ipfs://', 'ipfs://']):
+                            print(f"    💡 Suggestion: URL format not recognized as ARC19, ARC69, or standard IPFS")
                 
         except Exception as e:
             # Handle any unexpected errors during asset processing
