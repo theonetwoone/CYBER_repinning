@@ -8,6 +8,24 @@ import multibase
 import json
 import time
 
+def redact_sensitive_headers(headers):
+    """
+    Redact sensitive information from headers for safe logging.
+    Returns a copy with Authorization headers redacted.
+    """
+    redacted = {}
+    for key, value in headers.items():
+        if key.lower() == 'authorization' and isinstance(value, str):
+            if value.startswith('Bearer '):
+                redacted[key] = 'Bearer [REDACTED]'
+            elif value.startswith('Basic '):
+                redacted[key] = 'Basic [REDACTED]'
+            else:
+                redacted[key] = '[REDACTED]'
+        else:
+            redacted[key] = value
+    return redacted
+
 def get_all_creator_assets(creator_address):
     """
     Fetch all assets created by a specific Algorand address using direct API calls.
@@ -220,17 +238,18 @@ def fetch_metadata_and_extract_image_cid(metadata_cid):
     Fetch metadata JSON from IPFS and extract image CID.
     Returns: (image_cid, metadata_json) or (None, None) if failed
     """
-    # Common IPFS gateways to try
+    # Common IPFS gateways to try - reduced list for faster failure
     gateways = [
         "https://ipfs.io/ipfs/",
         "https://gateway.ipfs.io/ipfs/",
         "https://cloudflare-ipfs.com/ipfs/"
     ]
     
-    for gateway in gateways:
+    for i, gateway in enumerate(gateways):
         try:
             url = f"{gateway}{metadata_cid}"
-            response = requests.get(url, timeout=15)
+            # Reduced timeout to 8 seconds to prevent long hangs
+            response = requests.get(url, timeout=8)
             
             if response.status_code == 200:
                 metadata = response.json()
@@ -256,7 +275,10 @@ def fetch_metadata_and_extract_image_cid(metadata_cid):
                     return None, metadata
                     
         except Exception as e:
-            print(f"❌ METADATA: Failed to fetch from {gateway}: {e}")
+            print(f"❌ METADATA: Failed to fetch from {gateway} (attempt {i+1}/3): {e}")
+            # Don't continue trying all gateways if we hit too many errors
+            if i >= 1:  # Only try first 2 gateways to fail faster
+                break
             continue
     
     print(f"❌ METADATA: Could not fetch metadata for CID: {metadata_cid}")
@@ -284,89 +306,108 @@ def create_collection_dataframe(assets, existing_df=None):
     deleted_assets = 0
     no_cid_assets = 0
     processed_assets = 0
+    failed_assets = 0
     
     print(f"🔧 DEBUG: Starting to process {total_assets} assets...")
     
-    for asset in assets:
-        # Skip deleted assets
-        if asset.get('deleted', False):
-            deleted_assets += 1
+    for i, asset in enumerate(assets):
+        try:
+            # Progress indicator for large collections
+            if i % 100 == 0 and i > 0:
+                print(f"🔧 DEBUG: Processed {i}/{total_assets} assets ({(i/total_assets)*100:.1f}%)...")
+            
+            # Skip deleted assets
+            if asset.get('deleted', False):
+                deleted_assets += 1
+                asset_id = asset.get('index', 'Unknown')
+                asset_name = asset.get('params', {}).get('name', 'Unknown')
+                print(f"🔧 DEBUG: ❌ Skipping deleted asset {asset_id} ({asset_name})")
+                continue
+                
+            asset_params = asset.get('params', {})
+            arc_standard = detect_arc_standard(asset_params)
+            metadata_cid = extract_cid_from_asset(asset)
+            
+            if metadata_cid:  # Only include assets with valid CIDs
+                processed_assets += 1
+                asset_id = str(asset['index'])
+                asset_name = asset_params.get('name', 'Unknown')
+                asset_url = asset_params.get('url', '')
+                
+                # Handle image CID extraction based on ARC standard
+                image_cid = None
+                
+                if arc_standard == 'arc19':
+                    # For ARC-19, fetch metadata to get image CID with timeout protection
+                    print(f"🔍 ARC-19: Fetching metadata for asset {asset_id} ({asset_name}): {metadata_cid}")
+                    try:
+                        image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
+                    except Exception as metadata_error:
+                        print(f"⚠️ ARC-19: Failed to fetch metadata for {asset_id}: {metadata_error}")
+                        image_cid = None  # Continue processing without image CID
+                elif arc_standard == 'arc69':
+                    # For ARC-69, image CID is already extracted from metadata
+                    image_cid = metadata_cid  # In ARC-69, the metadata CID IS the image CID
+                    print(f"🔍 ARC-69: Using metadata CID as image CID for asset {asset_id}: {image_cid}")
+                elif arc_standard == 'standard_ipfs':
+                    # For standard IPFS, the URL directly points to the image
+                    image_cid = metadata_cid  # The extracted CID is the image CID
+                    print(f"🔍 Standard IPFS: Using URL CID as image CID for asset {asset_id}: {image_cid}")
+                
+                # Check if we have existing status for this asset
+                if asset_id in existing_lookup:
+                    existing_data = existing_lookup[asset_id]
+                    data_row = {
+                        "asset_id": asset_id,
+                        "asset_name": asset_name,
+                        "asset_url": asset_url,
+                        "arc_standard": arc_standard,  # NEW: Track ARC standard
+                        "metadata_cid": metadata_cid,
+                        "image_cid": image_cid if image_cid else "",
+                        "status": existing_data['status'],
+                        "repin_cid": existing_data['repin_cid'] if existing_data['repin_cid'] else "",
+                        "error_message": existing_data['error_message'] if existing_data['error_message'] else ""
+                    }
+                else:
+                    # New asset or first run
+                    data_row = {
+                        "asset_id": asset_id,
+                        "asset_name": asset_name,
+                        "asset_url": asset_url,
+                        "arc_standard": arc_standard,  # NEW: Track ARC standard
+                        "metadata_cid": metadata_cid,
+                        "image_cid": image_cid if image_cid else "",
+                        "status": "pending",
+                        "repin_cid": "",
+                        "error_message": ""
+                    }
+                processed_data.append(data_row)
+            else:
+                # Asset has no valid CID
+                no_cid_assets += 1
+                asset_id = asset.get('index', 'Unknown')
+                asset_name = asset_params.get('name', 'Unknown')
+                asset_url = asset_params.get('url', '')
+                reserve = asset_params.get('reserve', '')
+                print(f"🔧 DEBUG: ❌ No CID extracted for asset {asset_id} ({asset_name})")
+                print(f"    URL: {asset_url[:50] if asset_url else 'None'}...")
+                print(f"    Reserve: {'Present' if reserve else 'None'}")
+                print(f"    ARC Standard: {arc_standard}")
+                
+        except Exception as e:
+            # Handle any unexpected errors during asset processing
+            failed_assets += 1
             asset_id = asset.get('index', 'Unknown')
             asset_name = asset.get('params', {}).get('name', 'Unknown')
-            print(f"🔧 DEBUG: ❌ Skipping deleted asset {asset_id} ({asset_name})")
+            print(f"🔧 DEBUG: ❌ Error processing asset {asset_id} ({asset_name}): {e}")
             continue
-            
-        asset_params = asset.get('params', {})
-        arc_standard = detect_arc_standard(asset_params)
-        metadata_cid = extract_cid_from_asset(asset)
-        
-        if metadata_cid:  # Only include assets with valid CIDs
-            processed_assets += 1
-            asset_id = str(asset['index'])
-            asset_name = asset_params.get('name', 'Unknown')
-            asset_url = asset_params.get('url', '')
-            
-            # Handle image CID extraction based on ARC standard
-            image_cid = None
-            
-            if arc_standard == 'arc19':
-                # For ARC-19, fetch metadata to get image CID
-                print(f"🔍 ARC-19: Fetching metadata for asset {asset_id} ({asset_name}): {metadata_cid}")
-                image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
-            elif arc_standard == 'arc69':
-                # For ARC-69, image CID is already extracted from metadata
-                image_cid = metadata_cid  # In ARC-69, the metadata CID IS the image CID
-                print(f"🔍 ARC-69: Using metadata CID as image CID for asset {asset_id}: {image_cid}")
-            elif arc_standard == 'standard_ipfs':
-                # For standard IPFS, the URL directly points to the image
-                image_cid = metadata_cid  # The extracted CID is the image CID
-                print(f"🔍 Standard IPFS: Using URL CID as image CID for asset {asset_id}: {image_cid}")
-            
-            # Check if we have existing status for this asset
-            if asset_id in existing_lookup:
-                existing_data = existing_lookup[asset_id]
-                data_row = {
-                    "asset_id": asset_id,
-                    "asset_name": asset_name,
-                    "asset_url": asset_url,
-                    "arc_standard": arc_standard,  # NEW: Track ARC standard
-                    "metadata_cid": metadata_cid,
-                    "image_cid": image_cid if image_cid else "",
-                    "status": existing_data['status'],
-                    "repin_cid": existing_data['repin_cid'] if existing_data['repin_cid'] else "",
-                    "error_message": existing_data['error_message'] if existing_data['error_message'] else ""
-                }
-            else:
-                # New asset or first run
-                data_row = {
-                    "asset_id": asset_id,
-                    "asset_name": asset_name,
-                    "asset_url": asset_url,
-                    "arc_standard": arc_standard,  # NEW: Track ARC standard
-                    "metadata_cid": metadata_cid,
-                    "image_cid": image_cid if image_cid else "",
-                    "status": "pending",
-                    "repin_cid": "",
-                    "error_message": ""
-                }
-            processed_data.append(data_row)
-        else:
-            # Asset has no valid CID
-            no_cid_assets += 1
-            asset_id = asset.get('index', 'Unknown')
-            asset_name = asset_params.get('name', 'Unknown')
-            asset_url = asset_params.get('url', '')
-            reserve = asset_params.get('reserve', '')
-            print(f"🔧 DEBUG: ❌ No CID extracted for asset {asset_id} ({asset_name})")
-            print(f"    URL: {asset_url[:50] if asset_url else 'None'}...")
-            print(f"    Reserve: {'Present' if reserve else 'None'}")
-            print(f"    ARC Standard: {arc_standard}")
     
     # Print processing summary
     print(f"🔧 DEBUG: Asset processing complete!")
     print(f"    📊 Total assets found: {total_assets}")
     print(f"    🗑️ Deleted assets skipped: {deleted_assets}")
     print(f"    ❌ No CID extracted: {no_cid_assets}")
+    print(f"    ⚠️ Processing errors: {failed_assets}")
     print(f"    ✅ Successfully processed: {processed_assets}")
     print(f"    📋 Final DataFrame size: {processed_assets} rows")
     
@@ -782,7 +823,7 @@ def _pin_with_4everland(api_key, cid_to_pin):
         data = {'cid': cid_to_pin}
         
         print(f"🔧 DEBUG 4everland: URL: {url}")
-        print(f"🔧 DEBUG 4everland: Headers: {headers}")
+        print(f"🔧 DEBUG 4everland: Headers: {redact_sensitive_headers(headers)}")
         print(f"🔧 DEBUG 4everland: Data: {data}")
         
         response = requests.post(url, headers=headers, json=data, timeout=30)

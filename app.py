@@ -600,8 +600,79 @@ def main():
         - **Fetches** your Algorand NFT collection's IPFS metadata and image CIDs
         - **Migrates** them to a reliable IPFS pinning service
         - **Ensures** your NFTs remain accessible forever
+        """)
         
-        ### 🚀 Get started:
+        # One-Click Installer Section
+        st.markdown("---")
+        st.markdown("## 💻 Easy Local Installation")
+        st.markdown("**Want to run this tool locally on your computer? Use our one-click installers!**")
+        
+        # Create columns for the three operating systems
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("""
+            ### 🪟 **Windows**
+            """)
+            # Create download button for Windows installer
+            with open("install_windows.bat", "rb") as file:
+                st.download_button(
+                    label="📥 Download Windows Installer",
+                    data=file,
+                    file_name="install_windows.bat",
+                    mime="application/octet-stream",
+                    help="Downloads installer for Windows 10/11",
+                    type="primary"
+                )
+        
+        with col2:
+            st.markdown("""
+            ### 🍎 **Mac**
+            """)
+            # Create download button for Mac installer
+            with open("install_mac.sh", "rb") as file:
+                st.download_button(
+                    label="📥 Download Mac Installer",
+                    data=file,
+                    file_name="install_mac.sh",
+                    mime="application/x-sh",
+                    help="Downloads installer for macOS 10.15+",
+                    type="primary"
+                )
+        
+        with col3:
+            st.markdown("""
+            ### 🐧 **Linux**
+            """)
+            # Create download button for Linux installer
+            with open("install_linux.sh", "rb") as file:
+                st.download_button(
+                    label="📥 Download Linux Installer",
+                    data=file,
+                    file_name="install_linux.sh",
+                    mime="application/x-sh",
+                    help="Downloads installer for Ubuntu, Debian, CentOS, Fedora, Arch",
+                    type="primary"
+                )
+        
+        st.markdown("""
+        ### ✨ **What the installers do:**
+        - ✅ **Check** for required dependencies (Python, Git)
+        - ✅ **Download** the latest code from GitHub
+        - ✅ **Install** all Python dependencies automatically
+        - ✅ **Create** desktop shortcuts for easy access
+        - ✅ **Just double-click** the installer and you're ready to go!
+        
+        ### 🌐 **After installation:**
+        - The tool will run locally on your computer at `http://localhost:8501`
+        - Your API keys and data stay on your machine - more secure!
+        - No internet dependency once installed (except for IPFS operations)
+        
+        ---
+        """)
+        
+        st.markdown("""
+        ### 🚀 Get started with the web version:
         1. Choose an input method in the sidebar (Manual, Algorand fetch, or CSV upload)
         2. Configure your pinning service credentials
         3. Review your collection and estimate storage costs
@@ -889,7 +960,7 @@ def main():
                 </div>
             </div>
             <p style="color: #666; font-family: 'VT323', monospace; font-size: 14px; margin-top: 10px;">
-                CYBER SKULLS REPINNING PROTOCOL v2.2.0 // OPTIMIZED FOR 4EVERLAND // CREATED BY ThΞOneTwo
+                CYBER SKULLS REPINNING PROTOCOL v2.3.0 // OPTIMIZED FOR 4EVERLAND // CREATED BY ThΞOneTwo
             </p>
         </div>
         """, unsafe_allow_html=True)
