@@ -119,9 +119,9 @@ cd "$INSTALL_DIR"
 
 # Install Python requirements (try user installation first)
 echo -e "${YELLOW}[INFO]${NC} Installing Python dependencies..."
-if ! pip3 install --user streamlit pandas requests base58 py-algorand-sdk multibase; then
+if ! pip3 install --user streamlit pandas requests base58 py-algorand-sdk py-multibase; then
     echo -e "${YELLOW}[WARNING]${NC} User installation failed, trying system installation..."
-    if ! pip3 install streamlit pandas requests base58 py-algorand-sdk multibase; then
+    if ! pip3 install streamlit pandas requests base58 py-algorand-sdk py-multibase; then
         echo -e "${RED}[ERROR]${NC} Failed to install Python dependencies"
         echo "You may need to use 'sudo pip3 install' or create a virtual environment"
         exit 1
