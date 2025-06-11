@@ -379,9 +379,9 @@ def fetch_metadata_and_extract_image_cid(metadata_cid):
     """
     # Common IPFS gateways to try - reduced list for faster failure
     gateways = [
-        "https://ipfs.io/ipfs/",
-        "https://gateway.ipfs.io/ipfs/",
-        "https://cloudflare-ipfs.com/ipfs/"
+        "https://dweb.link/ipfs/",           # IPFS Foundation
+        "https://ipfs.io/ipfs/",             # Protocol Labs
+        "https://gateway.ipfs.io/ipfs/",     # Protocol Labs backup
     ]
     
     for i, gateway in enumerate(gateways):
@@ -479,18 +479,15 @@ def create_collection_dataframe(assets, existing_df=None):
                 if arc_standard == 'arc19':
                     # Check if this ARC-19 asset has metadata_mime_type
                     metadata_mime_type = asset_params.get('metadata_mime_type', '')
-                    if not metadata_mime_type:
-                        # Missing metadata_mime_type - treat as ARC-69 style (CID is the image CID)
-                        image_cid = metadata_cid
-                        print(f"🔍 ARC-19 (missing metadata_mime_type): Using extracted CID as image CID for asset {asset_id}: {image_cid}")
+                    if metadata_mime_type:
+                        # Standard ARC-19 with metadata_mime_type
+                        print(f"🔍 ARC-19 (with metadata_mime_type): Fetching metadata")
+                        image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
                     else:
-                        # Standard ARC-19: fetch metadata to get image CID with timeout protection
-                        print(f"🔍 ARC-19: Fetching metadata for asset {asset_id} ({asset_name}): {metadata_cid}")
-                        try:
-                            image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
-                        except Exception as metadata_error:
-                            print(f"⚠️ ARC-19: Failed to fetch metadata for {asset_id}: {metadata_error}")
-                            image_cid = None  # Continue processing without image CID
+                        # ARC-19 template without metadata_mime_type - STILL need to fetch metadata!
+                        print(f"🔍 ARC-19 Template: Fetching metadata to extract image CID")
+                        image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
+                
                 elif arc_standard == 'arc69':
                     # For ARC-69, image CID is already extracted from metadata
                     image_cid = metadata_cid  # In ARC-69, the metadata CID IS the image CID
@@ -804,9 +801,9 @@ def estimate_collection_size(df, sample_count=3):
     
     # Common IPFS gateways to try
     gateways = [
-        "https://ipfs.io/ipfs/",
-        "https://gateway.ipfs.io/ipfs/",
-        "https://cloudflare-ipfs.com/ipfs/"
+        "https://dweb.link/ipfs/",           # IPFS Foundation
+        "https://ipfs.io/ipfs/",             # Protocol Labs
+        "https://gateway.ipfs.io/ipfs/",     # Protocol Labs backup
     ]
     
     for _, asset in sample_assets.iterrows():
@@ -1896,8 +1893,6 @@ def detect_old_web3_storage_risk(cids_to_check, sample_size=None):
         "https://ipfs.io/ipfs/",
         "https://gateway.ipfs.io/ipfs/",
         "https://dweb.link/ipfs/",
-        "https://cloudflare-ipfs.com/ipfs/",
-        "https://cf-ipfs.com/ipfs/",
         "https://gateway.pinata.cloud/ipfs/"
     ]
     
@@ -2714,8 +2709,9 @@ def verify_cleanup_success(api_key, cleanup_results):
     print(f"   • Verifying {len(cids_to_verify)} CIDs still exist after cleanup...")
     
     # Use memory-safe streaming verification
-    verified_count, total_cids, details, _ = _stream_verify_cids(api_key, cids_to_verify)
-    
+    verified_count, details, duplicate_report = _stream_verify_cids(api_key, cids_to_verify)
+    total_cids = len(cids_to_verify)
+    print(f"DEBUG VERIFICATION: Duplicate report: {duplicate_report}")
     verification_results = {
         'success': verified_count == total_cids,
         'verified_cids': verified_count,

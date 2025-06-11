@@ -575,11 +575,22 @@ def main():
                     
                     # Verify Pins button (sidebar)
                     st.markdown("---")
-                    st.markdown("**🔍 Quick Verification:**")
+                    st.markdown("**🔍 Verification Options:**")
+                    
+                    sidebar_verification_type = st.selectbox(
+                        "Type:",
+                        ["Quick Verify", "Full Duplicate Scan"],
+                        key="sidebar_verification_type",
+                        help="Quick Verify: Fast check if pins exist. Full Duplicate Scan: Comprehensive duplicate detection and cleanup options."
+                    )
+                    
                     if st.button("🔍 Verify Pins", type="secondary", key="sidebar_verify", 
                                 help="Verify that all CIDs in your collection are properly pinned on the selected service"):
                         if not st.session_state.collection_df.empty:
-                            verify_collection_pins(st.session_state.collection_df, selected_service, api_key_input)
+                            if sidebar_verification_type == "Full Duplicate Scan":
+                                verify_collection_pins_with_duplicates(st.session_state.collection_df, selected_service, api_key_input)
+                            else:
+                                verify_collection_pins(st.session_state.collection_df, selected_service, api_key_input)
                         else:
                             st.warning("⚠️ No collection loaded to verify.")
                 else:
@@ -823,8 +834,19 @@ def main():
                     migrate_collection(df, selected_service, api_key_input)
             
             with col2:
+                # Add verification type selector
+                verification_type = st.selectbox(
+                    "Verification Type:",
+                    ["Quick Verify", "Full Duplicate Scan"],
+                    key="verification_type",
+                    help="Quick Verify: Fast check if pins exist. Full Duplicate Scan: Comprehensive duplicate detection and cleanup options."
+                )
+                
                 if st.button("🔍 Verify Pins", type="secondary", disabled=migration_in_progress):
-                    verify_collection_pins(df, selected_service, api_key_input)
+                    if verification_type == "Full Duplicate Scan":
+                        verify_collection_pins_with_duplicates(df, selected_service, api_key_input)
+                    else:
+                        verify_collection_pins(df, selected_service, api_key_input)
             
             with col3:
                 if st.button("📥 Download Results", type="secondary"):
@@ -1321,6 +1343,10 @@ def display_verification_results():
     else:
         st.error(f"❌ Verification failed: 0/{results['total_count']} CIDs found")
     
+    # Show scan type indicator
+    if results.get('is_full_scan'):
+        st.info("🔍 **Full Duplicate Scan** completed - comprehensive analysis of all pins")
+    
     # Show duplicate detection results
     duplicate_report = results.get('duplicate_report')
     if duplicate_report:
@@ -1528,7 +1554,10 @@ def display_verification_results():
                             st.write(f"  {i}. {status_icon} {instance['status']} - Created: {instance['created'][:10]} - ID: {instance['request_id'][:8]}...")
                         st.write("---")
         else:
-            st.success("✅ **No Duplicates Found**: All pins are unique - excellent optimization!")
+            if results.get('is_full_scan'):
+                st.success("✅ **No Duplicates Found**: Full scan completed - all pins are unique! Perfect optimization!")
+            else:
+                st.success("✅ **No Duplicates Found**: All pins are unique - excellent optimization!")
     
     # Show asset status updates
     if results['assets_changed_to_pending'] > 0:
@@ -1693,6 +1722,120 @@ def download_results(df):
             file_name="nft_repinning_results.json",
             mime="application/json"
         )
+
+def verify_collection_pins_with_duplicates(df, service_name, api_key):
+    """Verify pins with comprehensive duplicate detection and cleanup options."""
+    if df.empty:
+        st.warning("⚠️ No collection data to verify.")
+        return
+    
+    with st.spinner("🔍 Performing full duplicate scan... This may take several minutes for large accounts."):
+        # Collect all CIDs to verify from all assets regardless of status
+        cids_to_verify = []
+        
+        for _, row in df.iterrows():
+            # Collect image CIDs
+            if row.get('image_cid') and row['image_cid'].strip():
+                cids_to_verify.append(row['image_cid'].strip())
+            
+            # Collect metadata CIDs
+            if row.get('metadata_cid') and row['metadata_cid'].strip():
+                cids_to_verify.append(row['metadata_cid'].strip())
+            
+            # Also collect from repin_cid field if it exists (for backwards compatibility)
+            if row.get('repin_cid') and row['repin_cid'] != "":
+                cids = [cid.strip() for cid in row['repin_cid'].split(',')]
+                cids_to_verify.extend(cids)
+        
+        # Remove duplicates while preserving order
+        cids_to_verify = list(dict.fromkeys(cids_to_verify))
+        
+        if cids_to_verify:
+            from utils import verify_pinned_cids_with_duplicate_detection
+            verified_count, total_count, details, duplicate_report = verify_pinned_cids_with_duplicate_detection(
+                service_name, api_key, cids_to_verify
+            )
+            
+            # Create lookup for pin verification results
+            pin_status_lookup = {}
+            for detail in details:
+                pin_status_lookup[detail['cid']] = detail['is_pinned']
+            
+            # Update asset statuses based on verification results
+            assets_changed_to_pending = 0
+            assets_kept_completed = 0
+            
+            for index, row in df.iterrows():
+                asset_image_cid = row.get('image_cid', '').strip()
+                asset_metadata_cid = row.get('metadata_cid', '').strip()
+                
+                # Determine what CIDs this asset actually has and needs
+                has_image_cid = bool(asset_image_cid)
+                has_metadata_cid = bool(asset_metadata_cid)
+                
+                # Check pinning status for CIDs that exist
+                image_pinned = True  # Default to True if no image CID exists
+                metadata_pinned = True  # Default to True if no metadata CID exists
+                
+                if has_image_cid:
+                    image_pinned = pin_status_lookup.get(asset_image_cid, False)
+                
+                if has_metadata_cid:
+                    if asset_metadata_cid == asset_image_cid:
+                        metadata_pinned = image_pinned  # Same as image CID (ARC-69)
+                    else:
+                        metadata_pinned = pin_status_lookup.get(asset_metadata_cid, False)
+                
+                # Asset is properly pinned if all its existing CIDs are pinned
+                asset_fully_pinned = image_pinned and metadata_pinned
+                
+                if asset_fully_pinned:
+                    # Keep or set as completed
+                    if st.session_state.collection_df.at[index, 'status'] != 'completed':
+                        st.session_state.collection_df.at[index, 'status'] = 'completed'
+                        st.session_state.collection_df.at[index, 'repin_cid'] = asset_image_cid
+                        st.session_state.collection_df.at[index, 'error_message'] = 'Verified as pinned'
+                    assets_kept_completed += 1
+                else:
+                    # Set to pending for re-migration
+                    st.session_state.collection_df.at[index, 'status'] = 'pending'
+                    st.session_state.collection_df.at[index, 'repin_cid'] = ''
+                    
+                    # Create detailed error message about what's not pinned
+                    error_parts = []
+                    if has_image_cid and not image_pinned:
+                        error_parts.append(f"Image CID not pinned: {asset_image_cid[:16]}...")
+                    if has_metadata_cid and asset_metadata_cid != asset_image_cid and not metadata_pinned:
+                        error_parts.append(f"Metadata CID not pinned: {asset_metadata_cid[:16]}...")
+                    
+                    error_message = "; ".join(error_parts) if error_parts else "CID verification failed"
+                    st.session_state.collection_df.at[index, 'error_message'] = f"Pin verification failed: {error_message}"
+                    assets_changed_to_pending += 1
+            
+            # Store verification results in session state for display after rerun
+            st.session_state.verification_results = {
+                'verified_count': verified_count,
+                'total_count': total_count,
+                'details': details,
+                'duplicate_report': duplicate_report,
+                'assets_changed_to_pending': assets_changed_to_pending,
+                'assets_kept_completed': assets_kept_completed,
+                'timestamp': pd.Timestamp.now().strftime("%H:%M:%S"),
+                'is_full_scan': True  # Flag to indicate this was a full duplicate scan
+            }
+            
+            # Force DataFrame refresh
+            st.session_state.collection_df = st.session_state.collection_df.copy(deep=True)
+            
+            # Rerun to refresh the display with updated statuses
+            if assets_changed_to_pending > 0 or assets_kept_completed > 0:
+                st.rerun()
+            else:
+                # If no status changes, show results immediately
+                display_verification_results()
+                
+        else:
+            st.warning("⚠️ No CIDs found to verify.")
 
 if __name__ == "__main__":
     main() 
