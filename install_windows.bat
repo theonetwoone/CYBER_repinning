@@ -128,7 +128,7 @@ git --version
 echo [OK] Git is installed and accessible
 
 :: Set installation directory
-set INSTALL_DIR=%USERPROFILE%\Desktop\CYBER_repinning
+set INSTALL_DIR=%USERPROFILE%\Desktop\CYBER_repinning_local
 echo.
 echo [STEP 3/5] Preparing installation directory...
 echo [INFO] Installing to: %INSTALL_DIR%
