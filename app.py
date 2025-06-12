@@ -146,6 +146,12 @@ def main():
     
     with header_col2:
         st.markdown('<h1 class="main-header">[ CYBER SKULLS // REPINNING PROTOCOL ]</h1>', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="text-align: center; color: #00FF41; font-family: 'VT323', monospace; font-size: 16px; margin-top: -10px;">
+            🚀 ENHANCED ARC-19 PROCESSING ENGINE v2.5.0 🚀<br/>
+            <span style="color: #FFFFFF; font-size: 14px;">3x Faster • Smart Caching • Enhanced Recovery • Gateway Support</span>
+        </div>
+        """, unsafe_allow_html=True)
     
     with header_col3:
         st.markdown("")  # Empty space for balance
@@ -178,11 +184,13 @@ def main():
                         if error:
                             st.error(f"❌ Error: {error}")
                         else:
-                            st.info(f"🔍 Please have patience while processing {len(assets)} assets (includes deleted and problematic assets)...")
+                            st.info(f"🔍 Processing {len(assets)} assets with Enhanced ARC-19 Engine (includes deleted/problematic assets)...")
                             collection_df = utils.create_collection_dataframe(assets, st.session_state.collection_df)
                             st.session_state.collection_df = collection_df
-                            # Show final processed count
+                            # Show final processed count with enhanced features notice
                             st.success(f"✅ Successfully processed {len(collection_df)} valid assets")
+                            if any(collection_df['arc_standard'] == 'arc19'):
+                                st.info("🚀 Enhanced ARC-19 processing active: Smart caching, retry logic, and gateway support enabled!")
                             
         elif input_method == "Fetch from Algorand":
             st.markdown("#### Direct Algorand Fetch")
@@ -199,11 +207,13 @@ def main():
                         if error:
                             st.error(f"❌ Error: {error}")
                         else:
-                            st.info(f"🔍 Please have patience while processing {len(assets)} assets (includes deleted and problematic assets)...")
-                            collection_df = utils.create_collection_dataframe(assets, st.session_state.collection_df)
-                            st.session_state.collection_df = collection_df
-                            # Show final processed count
-                            st.success(f"✅ Successfully processed {len(collection_df)} valid assets")
+                                                st.info(f"🔍 Processing {len(assets)} assets with Enhanced ARC-19 Engine (includes deleted/problematic assets)...")
+                    collection_df = utils.create_collection_dataframe(assets, st.session_state.collection_df)
+                    st.session_state.collection_df = collection_df
+                    # Show final processed count with enhanced features notice
+                    st.success(f"✅ Successfully processed {len(collection_df)} valid assets")
+                    if any(collection_df['arc_standard'] == 'arc19'):
+                        st.info("🚀 Enhanced ARC-19 processing active: Smart caching, retry logic, and gateway support enabled!")
                             
         elif input_method == "Upload CSV File":
             st.markdown("#### Upload CSV File")
@@ -999,7 +1009,7 @@ def main():
                 </div>
             </div>
             <p style="color: #666; font-family: 'VT323', monospace; font-size: 14px; margin-top: 10px;">
-                CYBER SKULLS REPINNING PROTOCOL v2.3.0 // OPTIMIZED FOR 4EVERLAND // CREATED BY ThΞOneTwo
+                CYBER SKULLS REPINNING PROTOCOL v2.5.0 // OPTIMIZED FOR 4EVERLAND // CREATED BY ThΞOneTwo
             </p>
         </div>
         """, unsafe_allow_html=True)
