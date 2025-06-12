@@ -67,57 +67,64 @@ def get_all_creator_assets(creator_address):
 def detect_arc_standard(asset_params):
     """
     Detect which ARC standard an asset follows.
-    Returns: 'arc19', 'arc69', 'standard_ipfs', or 'unknown'
+    Returns: 'arc19', 'arc69', 'standard_ipfs', 'gateway_ipfs', or 'unknown'
     """
     url = asset_params.get('url', '')
     metadata_mime_type = asset_params.get('metadata_mime_type', '')
-    
-    # ARC-19: Uses template-ipfs:// format OR has empty metadata_mime_type with CID in URL
-    if url.startswith('template-ipfs://'):
-        return 'arc19'
-    
-    # ARC-19 with missing/empty metadata_mime_type - treat as ARC-19 variant
-    print(f"DEBUG: Checking metadata_mime_type: '{metadata_mime_type}', type: {type(metadata_mime_type)}, not metadata_mime_type: {not metadata_mime_type}")
-    if not metadata_mime_type and url:
-        print(f"DEBUG: metadata_mime_type is falsy and URL exists: '{url[:50] if url else 'None'}...'")
-        # Check if URL contains a direct CID or IPFS URL
-        if (any(url.startswith(prefix) for prefix in ['Qm', 'bafy', 'bafk', 'bafz']) or 
-            url.startswith('ipfs://')):
-            print(f"DEBUG: Detected ARC-19 with empty metadata_mime_type: {url[:30]}...")
-            return 'arc19'
-        else:
-            print(f"DEBUG: URL doesn't start with expected CID/IPFS patterns: '{url[:30]}...'")
-    else:
-        if not url:
-            print(f"DEBUG: No URL found")
-        if metadata_mime_type:
-            print(f"DEBUG: metadata_mime_type is not empty: '{metadata_mime_type}'")
-    
-    # ARC-69: Has metadata in the 'am-' reserve field and may use standard IPFS URLs
-    # Check for ARC-69 metadata field (base64 encoded JSON in reserve)
     reserve = asset_params.get('reserve', '')
+    
+    # FIRST: Check for ARC-69 (most definitive - has metadata in reserve)
     if reserve:
         try:
             # ARC-69 stores metadata as base64 in the reserve field
             decoded = base64.b64decode(reserve + '==')  # Add padding just in case
             metadata = json.loads(decoded.decode('utf-8'))
-            if isinstance(metadata, dict) and ('image' in metadata or 'name' in metadata):
+            if isinstance(metadata, dict) and ('image' in metadata or 'name' in metadata or 'description' in metadata):
+                print(f"DEBUG: Detected ARC-69 (metadata in reserve field)")
                 return 'arc69'
-        except:
+        except Exception as e:
+            print(f"DEBUG: Failed to decode reserve field as ARC-69: {e}")
             pass
     
-    # Standard IPFS URL - check if it contains a valid CID pattern
+    # SECOND: Check for ARC-19 template format (most definitive for ARC-19)
+    if url.startswith('template-ipfs://'):
+        print(f"DEBUG: Detected ARC-19 (template-ipfs URL)")
+        return 'arc19'
+    
+    # THIRD: Check for IPFS gateway URLs (HTTP/HTTPS IPFS gateways)
+    if url and any(gateway in url for gateway in [
+        'ipfs.infura.io/ipfs/',
+        'gateway.pinata.cloud/ipfs/', 
+        'dweb.link/ipfs/',
+        'ipfs.io/ipfs/',
+        'gateway.ipfs.io/ipfs/',
+        'nftstorage.link/ipfs/',
+        'w3s.link/ipfs/'
+    ]):
+        print(f"DEBUG: Detected IPFS gateway URL: {url[:50]}...")
+        return 'gateway_ipfs'
+    
+    # FOURTH: Check for standard IPFS URLs
     if url.startswith('ipfs://'):
+        print(f"DEBUG: Detected standard IPFS URL: {url[:50]}...")
         return 'standard_ipfs'
     
-    # Special case: Check if there's a CID-like string in the URL but missing metadata_mime_type
-    # This handles cases where assets have CIDs in URL field but might be malformed
-    if url and len(url) > 20:  # Basic check for CID-like content
-        # Check for common CID patterns (Qm... or bafy...)
+    # FIFTH: ARC-19 fallback - only if metadata_mime_type is empty AND no reserve metadata
+    # This is for malformed ARC-19 assets that have direct CIDs but missing metadata_mime_type
+    if not metadata_mime_type and not reserve and url:
+        print(f"DEBUG: Checking for ARC-19 fallback - metadata_mime_type: '{metadata_mime_type}', reserve: {'present' if reserve else 'empty'}")
+        # Check if URL contains a direct CID
         if any(url.startswith(prefix) for prefix in ['Qm', 'bafy', 'bafk', 'bafz']):
-            print(f"DEBUG: Found CID-like pattern in URL but no standard prefix: {url[:30]}...")
+            print(f"DEBUG: Detected ARC-19 fallback (direct CID, no metadata_mime_type, no reserve): {url[:30]}...")
+            return 'arc19'
+    
+    # SIXTH: Check for potential CID patterns
+    if url and len(url) > 20:
+        if any(url.startswith(prefix) for prefix in ['Qm', 'bafy', 'bafk', 'bafz']):
+            print(f"DEBUG: Found potential CID pattern: {url[:30]}...")
             return 'potential_cid'
     
+    print(f"DEBUG: No ARC standard detected - URL: {url[:50] if url else 'None'}, metadata_mime_type: '{metadata_mime_type}', reserve: {'present' if reserve else 'empty'}")
     return 'unknown'
 
 def extract_cid_from_asset(asset):
@@ -147,6 +154,8 @@ def extract_cid_from_asset(asset):
             return extract_arc69_cid(asset_params)
         elif arc_standard == 'standard_ipfs':
             return extract_standard_ipfs_cid(asset_params)
+        elif arc_standard == 'gateway_ipfs':
+            return extract_gateway_ipfs_cid(asset_params)
         elif arc_standard == 'potential_cid':
             return extract_potential_cid(asset_params)
         
@@ -350,6 +359,45 @@ def extract_standard_ipfs_cid(asset_params):
         print(f"DEBUG IPFS: Error: {e}")
         return None
 
+def extract_gateway_ipfs_cid(asset_params):
+    """Extract CID from IPFS gateway URL (HTTP/HTTPS)."""
+    try:
+        url = asset_params.get('url', '')
+        if not url:
+            return None
+        
+        print(f"DEBUG GATEWAY: Processing gateway URL: {url}")
+        
+        # Common IPFS gateway patterns
+        gateway_patterns = [
+            'ipfs.infura.io/ipfs/',
+            'gateway.pinata.cloud/ipfs/',
+            'dweb.link/ipfs/',
+            'ipfs.io/ipfs/',
+            'gateway.ipfs.io/ipfs/',
+            'nftstorage.link/ipfs/',
+            'w3s.link/ipfs/'
+        ]
+        
+        for pattern in gateway_patterns:
+            if pattern in url:
+                # Extract everything after the gateway pattern
+                parts = url.split(pattern)
+                if len(parts) > 1:
+                    # Get the CID part (everything after pattern, before # or /)
+                    cid_with_path = parts[1]
+                    # Remove fragment and get base CID
+                    cid_part = cid_with_path.split('#')[0].split('/')[0]
+                    print(f"DEBUG GATEWAY: Extracted CID from {pattern}: {cid_part}")
+                    return cid_part
+        
+        print(f"DEBUG GATEWAY: No matching gateway pattern found in URL")
+        return None
+        
+    except Exception as e:
+        print(f"DEBUG GATEWAY: Error: {e}")
+        return None
+
 def extract_potential_cid(asset_params):
     """Extract CID from URL that appears to contain a raw CID."""
     try:
@@ -372,23 +420,44 @@ def extract_potential_cid(asset_params):
         print(f"DEBUG POTENTIAL_CID: Error: {e}")
         return None
 
-def fetch_metadata_and_extract_image_cid(metadata_cid):
+# Global cache for metadata to avoid refetching same CIDs
+_metadata_cache = {}
+
+def fetch_metadata_and_extract_image_cid(metadata_cid, retry_count=0, max_retries=2):
     """
-    Fetch metadata JSON from IPFS and extract image CID.
-    Returns: (image_cid, metadata_json) or (None, None) if failed
+    Robust metadata fetching with multiple fallbacks and retry logic.
+    Returns: (image_cid, metadata_json, status) where status indicates success/failure reason
     """
-    # Common IPFS gateways to try - reduced list for faster failure
-    gateways = [
-        "https://dweb.link/ipfs/",           # IPFS Foundation
+    # Check cache first
+    if metadata_cid in _metadata_cache:
+        cached_result = _metadata_cache[metadata_cid]
+        print(f"💾 CACHE HIT: Using cached metadata for {metadata_cid[:16]}...")
+        return cached_result
+    
+    # Extended gateway list with different timeout strategies
+    primary_gateways = [
+        "https://gateway.pinata.cloud/ipfs/", # Often faster
+        "https://dweb.link/ipfs/",           # IPFS Foundation  
         "https://ipfs.io/ipfs/",             # Protocol Labs
-        "https://gateway.ipfs.io/ipfs/",     # Protocol Labs backup
     ]
+    
+    # Backup gateways for retry attempts
+    backup_gateways = [
+        "https://gateway.ipfs.io/ipfs/",     # Protocol Labs backup
+        "https://cf-ipfs.com/ipfs/",         # Cloudflare
+        "https://hardbin.com/ipfs/",         # Alternative gateway
+    ]
+    
+    # Use primary gateways first, then backup gateways on retry
+    gateways = primary_gateways if retry_count == 0 else backup_gateways
     
     for i, gateway in enumerate(gateways):
         try:
             url = f"{gateway}{metadata_cid}"
-            # Reduced timeout to 8 seconds to prevent long hangs
-            response = requests.get(url, timeout=8)
+            # Adaptive timeout - longer on retries, shorter initially
+            timeout = 8 if retry_count > 0 else 5
+            
+            response = requests.get(url, timeout=timeout)
             
             if response.status_code == 200:
                 metadata = response.json()
@@ -401,32 +470,45 @@ def fetch_metadata_and_extract_image_cid(metadata_cid):
                 if animation_url and animation_url.startswith('ipfs://'):
                     media_cid = animation_url.replace('ipfs://', '').split('#')[0].split('/')[0]
                     print(f"✅ METADATA: Found animation CID: {media_cid} (from animation_url)")
-                    return media_cid, metadata
+                    result = (media_cid, metadata, "success")
+                    _metadata_cache[metadata_cid] = result  # Cache the result
+                    return result
                 
                 # Fallback to image field
                 elif image_url and image_url.startswith('ipfs://'):
                     media_cid = image_url.replace('ipfs://', '').split('#')[0].split('/')[0]
                     print(f"✅ METADATA: Found image CID: {media_cid} (from image)")
-                    return media_cid, metadata
+                    result = (media_cid, metadata, "success")
+                    _metadata_cache[metadata_cid] = result  # Cache the result
+                    return result
                 
                 else:
                     print(f"⚠️ METADATA: No IPFS media found - animation_url: {animation_url}, image: {image_url}")
-                    return None, metadata
+                    result = (None, metadata, "no_ipfs_media")
+                    _metadata_cache[metadata_cid] = result  # Cache even failed results
+                    return result
                     
         except Exception as e:
-            print(f"❌ METADATA: Failed to fetch from {gateway} (attempt {i+1}/3): {e}")
-            # Don't continue trying all gateways if we hit too many errors
-            if i >= 1:  # Only try first 2 gateways to fail faster
-                break
+            error_type = type(e).__name__
+            print(f"❌ METADATA: Failed to fetch from {gateway} (attempt {i+1}/{len(gateways)}, retry {retry_count}): {error_type}: {e}")
             continue
     
-    print(f"❌ METADATA: Could not fetch metadata for CID: {metadata_cid}")
-    return None, None
+    # If we get here, all gateways failed - try retry with different gateways
+    if retry_count < max_retries:
+        print(f"🔄 METADATA: Retrying with backup gateways (retry {retry_count + 1}/{max_retries})")
+        return fetch_metadata_and_extract_image_cid(metadata_cid, retry_count + 1, max_retries)
+    
+    # Final failure after all retries
+    print(f"❌ METADATA: Could not fetch metadata for CID: {metadata_cid} after {max_retries + 1} attempts")
+    result = (None, None, "fetch_failed")
+    _metadata_cache[metadata_cid] = result  # Cache failed results to avoid re-trying
+    return result
 
-def create_collection_dataframe(assets, existing_df=None):
+def create_collection_dataframe(assets, existing_df=None, use_robust_processing=True):
     """
     Create a structured DataFrame from the list of assets.
     Supports mixed ARC-19, ARC-69, and standard IPFS assets.
+    NOW WITH: Enhanced retry logic and robust error handling.
     """
     processed_data = []
     
@@ -440,20 +522,24 @@ def create_collection_dataframe(assets, existing_df=None):
                 'error_message': row.get('error_message')
             }
     
-    # Tracking variables for debugging
+    # Enhanced tracking variables for robust processing
     total_assets = len(assets)
     deleted_assets = 0
     no_cid_assets = 0
     processed_assets = 0
     failed_assets = 0
+    timeout_recoveries = 0
+    cache_hits = 0
     
-    print(f"🔧 DEBUG: Starting to process {total_assets} assets...")
+    processing_mode = "ROBUST" if use_robust_processing else "LEGACY"
+    print(f"🔧 DEBUG: Starting {processing_mode} processing of {total_assets} assets...")
     
     for i, asset in enumerate(assets):
         try:
-            # Progress indicator for large collections
-            if i % 100 == 0 and i > 0:
-                print(f"🔧 DEBUG: Processed {i}/{total_assets} assets ({(i/total_assets)*100:.1f}%)...")
+            # Enhanced progress indicator with performance stats
+            if i % 50 == 0 and i > 0:
+                cache_rate = (cache_hits / i) * 100 if i > 0 else 0
+                print(f"🔧 PROGRESS: {i}/{total_assets} ({(i/total_assets)*100:.1f}%) | Cache hits: {cache_hits} ({cache_rate:.1f}%) | Recoveries: {timeout_recoveries}")
             
             # Skip deleted assets
             if asset.get('deleted', False):
@@ -476,17 +562,46 @@ def create_collection_dataframe(assets, existing_df=None):
                 # Handle image CID extraction based on ARC standard
                 image_cid = None
                 
-                if arc_standard == 'arc19':
-                    # Check if this ARC-19 asset has metadata_mime_type
+                if arc_standard == 'arc19' and use_robust_processing:
+                    # 🚀 NEW: Enhanced ARC-19 processing with robust retry logic
+                    print(f"🔍 ROBUST ARC-19: Processing asset {asset_id} with enhanced retry logic")
+                    fetch_result = fetch_metadata_and_extract_image_cid(metadata_cid)
+                    
+                    # Handle new 3-tuple return format with performance tracking
+                    if len(fetch_result) == 3:
+                        image_cid, metadata, status = fetch_result
+                        
+                        # Track performance metrics
+                        if status == "cache_hit":
+                            cache_hits += 1
+                            print(f"💾 Cache hit for asset {asset_id}")
+                        elif status == "retry_success":
+                            timeout_recoveries += 1
+                            print(f"🔄 Recovered from timeout for asset {asset_id}")
+                        elif status in ["timeout_failed", "fetch_failed"]:
+                            print(f"⚠️ Failed to fetch metadata for asset {asset_id}: {status}")
+                            # Still continue - don't break the whole collection
+                    else:
+                        # Fallback for compatibility
+                        image_cid, metadata = fetch_result
+                        
+                elif arc_standard == 'arc19':
+                    # Original ARC-19 processing for comparison/fallback
                     metadata_mime_type = asset_params.get('metadata_mime_type', '')
                     if metadata_mime_type:
-                        # Standard ARC-19 with metadata_mime_type
                         print(f"🔍 ARC-19 (with metadata_mime_type): Fetching metadata")
-                        image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
+                        fetch_result = fetch_metadata_and_extract_image_cid(metadata_cid)
                     else:
-                        # ARC-19 template without metadata_mime_type - STILL need to fetch metadata!
                         print(f"🔍 ARC-19 Template: Fetching metadata to extract image CID")
-                        image_cid, metadata = fetch_metadata_and_extract_image_cid(metadata_cid)
+                        fetch_result = fetch_metadata_and_extract_image_cid(metadata_cid)
+                    
+                    # Handle return format
+                    if len(fetch_result) == 3:
+                        image_cid, metadata, status = fetch_result
+                        if status != "success" and status != "cache_hit":
+                            print(f"⚠️ ARC-19 metadata fetch status: {status}")
+                    else:
+                        image_cid, metadata = fetch_result
                 
                 elif arc_standard == 'arc69':
                     # For ARC-69, image CID is already extracted from metadata
@@ -496,6 +611,10 @@ def create_collection_dataframe(assets, existing_df=None):
                     # For standard IPFS, the URL directly points to the image
                     image_cid = metadata_cid  # The extracted CID is the image CID
                     print(f"🔍 Standard IPFS: Using URL CID as image CID for asset {asset_id}: {image_cid}")
+                elif arc_standard == 'gateway_ipfs':
+                    # For gateway IPFS, the URL directly points to the image
+                    image_cid = metadata_cid  # The extracted CID is the image CID
+                    print(f"🔍 Gateway IPFS: Using URL CID as image CID for asset {asset_id}: {image_cid}")
                 
                 # Check if we have existing status for this asset
                 if asset_id in existing_lookup:
@@ -571,16 +690,24 @@ def create_collection_dataframe(assets, existing_df=None):
                         print(f"    🔍 ARC69 Diagnosis: Missing reserve field required for ARC69")
                 elif arc_standard == 'standard_ipfs':
                     print(f"    🔍 IPFS Diagnosis: URL should start with 'ipfs://' but extraction failed")
+                elif arc_standard == 'gateway_ipfs':
+                    print(f"    🔍 GATEWAY_IPFS Diagnosis: URL uses HTTP/HTTPS IPFS gateway but extraction failed")
                 elif arc_standard == 'potential_cid':
                     print(f"    🔍 POTENTIAL_CID Diagnosis: URL contains CID-like pattern but extraction failed")
                     print(f"    💡 Note: This might be the case mentioned 'cid was presented under url but missing metadata_mime_type'")
                 elif arc_standard == 'unknown':
                     print(f"    🔍 General Diagnosis: Asset doesn't match any known ARC standard pattern")
                     if asset_url:
-                        if asset_url.startswith('http'):
+                        if asset_url.startswith('http') and not any(gateway in asset_url for gateway in [
+                            'ipfs.infura.io/ipfs/', 'gateway.pinata.cloud/ipfs/', 'dweb.link/ipfs/',
+                            'ipfs.io/ipfs/', 'gateway.ipfs.io/ipfs/', 'nftstorage.link/ipfs/', 'w3s.link/ipfs/'
+                        ]):
                             print(f"    💡 Suggestion: Asset uses HTTP URL - not compatible with IPFS pinning")
-                        elif not any(asset_url.startswith(prefix) for prefix in ['template-ipfs://', 'ipfs://']):
-                            print(f"    💡 Suggestion: URL format not recognized as ARC19, ARC69, or standard IPFS")
+                        elif not any(asset_url.startswith(prefix) for prefix in ['template-ipfs://', 'ipfs://']) and not any(gateway in asset_url for gateway in [
+                            'ipfs.infura.io/ipfs/', 'gateway.pinata.cloud/ipfs/', 'dweb.link/ipfs/',
+                            'ipfs.io/ipfs/', 'gateway.ipfs.io/ipfs/', 'nftstorage.link/ipfs/', 'w3s.link/ipfs/'
+                        ]):
+                            print(f"    💡 Suggestion: URL format not recognized as ARC19, ARC69, standard IPFS, or gateway IPFS")
                 
         except Exception as e:
             # Handle any unexpected errors during asset processing
@@ -590,14 +717,22 @@ def create_collection_dataframe(assets, existing_df=None):
             print(f"🔧 DEBUG: ❌ Error processing asset {asset_id} ({asset_name}): {e}")
             continue
     
-    # Print processing summary
-    print(f"🔧 DEBUG: Asset processing complete!")
+    # Enhanced processing summary with performance metrics
+    cache_hit_rate = (cache_hits / processed_assets) * 100 if processed_assets > 0 else 0
+    recovery_rate = (timeout_recoveries / processed_assets) * 100 if processed_assets > 0 else 0
+    
+    print(f"🔧 PROCESSING COMPLETE ({processing_mode}):")
     print(f"    📊 Total assets found: {total_assets}")
     print(f"    🗑️ Deleted assets skipped: {deleted_assets}")
+    print(f"    ✅ Successfully processed: {processed_assets}")
+    print(f"    💾 Cache hits: {cache_hits} ({cache_hit_rate:.1f}%)")
+    print(f"    🔄 Timeout recoveries: {timeout_recoveries} ({recovery_rate:.1f}%)")
     print(f"    ❌ No CID extracted: {no_cid_assets}")
     print(f"    ⚠️ Processing errors: {failed_assets}")
-    print(f"    ✅ Successfully processed: {processed_assets}")
     print(f"    📋 Final DataFrame size: {processed_assets} rows")
+    
+    if use_robust_processing and (cache_hits > 0 or timeout_recoveries > 0):
+        print(f"🚀 PERFORMANCE BOOST: Robust processing improved {cache_hits + timeout_recoveries} asset fetches!")
     
     df = pd.DataFrame(processed_data)
     
@@ -2891,3 +3026,207 @@ def _multi_tier_individual_fallback(api_key, cids_to_check):
     print(f"🎯 MULTI-TIER SUMMARY: Found {total_found}/{total_checked} CIDs across all tiers")
     
     return results
+
+def process_arc19_collection_robust(assets, progress_callback=None):
+    """
+    Robust ARC-19 collection processing with comprehensive error handling and recovery.
+    
+    Args:
+        assets: List of asset data
+        progress_callback: Optional function to call with progress updates
+    
+    Returns:
+        dict with processing results and detailed status
+    """
+    results = {
+        'processed_assets': [],
+        'failed_assets': [],
+        'success_count': 0,
+        'failure_count': 0,
+        'timeout_count': 0,
+        'cache_hits': 0,
+        'unique_metadata_cids': set(),
+        'unique_image_cids': set(),
+        'processing_summary': {},
+        'errors_by_type': {},
+        'retry_successful': 0
+    }
+    
+    total_assets = len(assets)
+    print(f"🚀 ROBUST PROCESSING: Starting {total_assets} ARC-19 assets with full error recovery")
+    
+    for i, asset in enumerate(assets):
+        try:
+            asset_id = asset.get('index', f'unknown_{i}')
+            asset_name = asset.get('params', {}).get('name', 'Unknown')
+            
+            # Progress update
+            if progress_callback and i % 10 == 0:
+                progress_callback(i, total_assets, results)
+            
+            # Extract metadata CID using existing logic
+            metadata_cid = extract_cid_from_asset(asset)
+            
+            if not metadata_cid:
+                results['failed_assets'].append({
+                    'asset_id': asset_id,
+                    'asset_name': asset_name,
+                    'error': 'no_metadata_cid',
+                    'details': 'Could not extract metadata CID from asset parameters'
+                })
+                results['failure_count'] += 1
+                continue
+            
+            results['unique_metadata_cids'].add(metadata_cid)
+            
+            # Try to fetch metadata and extract image CID with robust retry logic
+            fetch_result = fetch_metadata_and_extract_image_cid(metadata_cid)
+            
+            # Handle the new 3-tuple return format
+            if len(fetch_result) == 3:
+                image_cid, metadata, status = fetch_result
+            else:
+                # Fallback for old 2-tuple format
+                image_cid, metadata = fetch_result
+                status = "legacy_format"
+            
+            # Track results by status
+            if status == "success":
+                results['success_count'] += 1
+                if image_cid:
+                    results['unique_image_cids'].add(image_cid)
+                
+                # Check if this was from cache
+                if metadata_cid in _metadata_cache:
+                    results['cache_hits'] += 1
+                    
+            elif status == "fetch_failed":
+                results['timeout_count'] += 1
+                results['failed_assets'].append({
+                    'asset_id': asset_id,
+                    'asset_name': asset_name,
+                    'metadata_cid': metadata_cid,
+                    'error': 'fetch_timeout',
+                    'details': 'All gateways timed out after retries'
+                })
+            else:
+                results['failure_count'] += 1
+                
+            # Track error types
+            if status != "success":
+                if status not in results['errors_by_type']:
+                    results['errors_by_type'][status] = 0
+                results['errors_by_type'][status] += 1
+            
+            # Add to processed assets
+            results['processed_assets'].append({
+                'asset_id': asset_id,
+                'asset_name': asset_name,
+                'metadata_cid': metadata_cid,
+                'image_cid': image_cid,
+                'status': status,
+                'success': status == "success"
+            })
+            
+            # Progress logging every 50 assets
+            if (i + 1) % 50 == 0:
+                print(f"📊 PROGRESS: {i+1}/{total_assets} - Success: {results['success_count']}, Failed: {results['failure_count']}, Timeouts: {results['timeout_count']}")
+                
+        except Exception as e:
+            print(f"❌ CRITICAL ERROR processing asset {asset_id}: {e}")
+            results['failed_assets'].append({
+                'asset_id': asset_id,
+                'asset_name': asset_name,
+                'error': 'processing_exception',
+                'details': str(e)
+            })
+            results['failure_count'] += 1
+            continue
+    
+    # Final progress update
+    if progress_callback:
+        progress_callback(total_assets, total_assets, results)
+    
+    # Generate processing summary
+    results['processing_summary'] = {
+        'total_assets': total_assets,
+        'success_rate': (results['success_count'] / total_assets) * 100 if total_assets > 0 else 0,
+        'unique_metadata_cids': len(results['unique_metadata_cids']),
+        'unique_image_cids': len(results['unique_image_cids']),
+        'cache_hit_rate': (results['cache_hits'] / results['success_count']) * 100 if results['success_count'] > 0 else 0,
+        'directory_efficiency': (len(results['unique_image_cids']) / total_assets) * 100 if total_assets > 0 else 0
+    }
+    
+    print(f"🎯 ROBUST PROCESSING COMPLETE:")
+    print(f"   ✅ Success: {results['success_count']}/{total_assets} ({results['processing_summary']['success_rate']:.1f}%)")
+    print(f"   ❌ Failed: {results['failure_count']}")
+    print(f"   ⏰ Timeouts: {results['timeout_count']}")
+    print(f"   💾 Cache hits: {results['cache_hits']}")
+    print(f"   📁 Unique image CIDs: {len(results['unique_image_cids'])}")
+    print(f"   📊 Directory efficiency: {results['processing_summary']['directory_efficiency']:.1f}%")
+    
+    return results
+
+def recover_failed_assets(failed_assets, max_retries=3):
+    """
+    Attempt to recover assets that failed during initial processing.
+    
+    Args:
+        failed_assets: List of failed asset info from process_arc19_collection_robust
+        max_retries: Maximum retry attempts per asset
+    
+    Returns:
+        dict with recovery results
+    """
+    recovery_results = {
+        'recovered_assets': [],
+        'still_failed_assets': [],
+        'recovery_count': 0,
+        'permanent_failures': 0
+    }
+    
+    print(f"🔄 RECOVERY: Attempting to recover {len(failed_assets)} failed assets")
+    
+    for asset_info in failed_assets:
+        if asset_info['error'] in ['fetch_timeout', 'fetch_failed']:
+            metadata_cid = asset_info.get('metadata_cid')
+            if metadata_cid:
+                # Clear from cache to force fresh attempt
+                if metadata_cid in _metadata_cache:
+                    del _metadata_cache[metadata_cid]
+                
+                # Retry with maximum effort
+                print(f"🔄 Retrying {asset_info['asset_id']}: {metadata_cid[:16]}...")
+                fetch_result = fetch_metadata_and_extract_image_cid(metadata_cid, max_retries=max_retries)
+                
+                if len(fetch_result) == 3:
+                    image_cid, metadata, status = fetch_result
+                else:
+                    image_cid, metadata = fetch_result
+                    status = "legacy_format"
+                
+                if status == "success":
+                    print(f"✅ RECOVERED: {asset_info['asset_id']}")
+                    recovery_results['recovered_assets'].append({
+                        **asset_info,
+                        'image_cid': image_cid,
+                        'recovery_status': 'success'
+                    })
+                    recovery_results['recovery_count'] += 1
+                else:
+                    print(f"❌ STILL FAILED: {asset_info['asset_id']}")
+                    recovery_results['still_failed_assets'].append(asset_info)
+                    recovery_results['permanent_failures'] += 1
+            else:
+                recovery_results['still_failed_assets'].append(asset_info)
+                recovery_results['permanent_failures'] += 1
+        else:
+            # Non-recoverable error type
+            recovery_results['still_failed_assets'].append(asset_info)
+            recovery_results['permanent_failures'] += 1
+    
+    print(f"🎯 RECOVERY COMPLETE:")
+    print(f"   ✅ Recovered: {recovery_results['recovery_count']}")
+    print(f"   ❌ Permanent failures: {recovery_results['permanent_failures']}")
+    
+    return recovery_results
