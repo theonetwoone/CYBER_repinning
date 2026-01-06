@@ -1,7 +1,7 @@
 streamlit>=1.28.0
 algosdk
 pandas>=1.5.0
-requests>=2.28.0
+requests>=2.31.0
 base58>=2.1.0
-py-algorand-sdk>=2.4.0
+py-algorand-sdk>=2.6.0
 py-multibase
