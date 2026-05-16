@@ -3,6 +3,33 @@ import pandas as pd
 import json
 import utils
 
+EVERPIN_SNAPSHOT_SESSION_KEY = "everpin_4ever_snap_v1"
+
+
+def everpin_resolve_session_snapshot(selected_service_label, api_key):
+    """
+    Reuse fetched 4EVER Pin listing rows inside this browser tab (Streamlit session) while the fingerprint
+    matches the pasted access token. Invalidated automatically when duplicates are deleted or credentials clear.
+    """
+    from utils import everpin_api_key_fingerprint, everpin_create_4everland_session_store
+
+    svc = str(selected_service_label or "").strip().split(" ")[0].lower()
+    if svc != "4everland" or not api_key:
+        return None
+
+    fp = everpin_api_key_fingerprint(api_key)
+    snap = st.session_state.get(EVERPIN_SNAPSHOT_SESSION_KEY)
+
+    if snap is None or snap.get("service") != "4everland" or snap.get("api_key_fp") != fp:
+        snap = everpin_create_4everland_session_store(api_key)
+        st.session_state[EVERPIN_SNAPSHOT_SESSION_KEY] = snap
+
+    return snap
+
+
+def everpin_discard_snapshot_cache():
+    st.session_state.pop(EVERPIN_SNAPSHOT_SESSION_KEY, None)
+
 def ensure_dataframe_dtypes(df):
     """Ensure DataFrame has proper string dtypes to prevent pandas warnings."""
     if df.empty:
@@ -609,6 +636,7 @@ def main():
                         del st.session_state.api_key
                     if hasattr(st.session_state, 'selected_service'):
                         del st.session_state.selected_service
+                    everpin_discard_snapshot_cache()
                     st.info("💡 **Tip:** Enter your API key above to unlock verification and migration features.")
 
     # Main content area
@@ -1357,8 +1385,17 @@ def display_verification_results():
     if results.get('is_full_scan'):
         st.info("🔍 **Full Duplicate Scan** completed - comprehensive analysis of all pins")
     
-    # Show duplicate detection results
     duplicate_report = results.get('duplicate_report')
+    if duplicate_report and duplicate_report.get('session_cache_active'):
+        nreq = duplicate_report.get('session_cached_pin_requests')
+        nc = duplicate_report.get('session_confirmed_unique_cids')
+        exh = duplicate_report.get('session_exhaustive_account')
+        st.caption(
+            f"⚡ **Session snapshot:** reused **{nreq}** cached pin-request row(s) (**{nc}** CIDs queried in this tab). "
+            f"{'Full-account list cached.' if exh else 'Incremental cache (only CIDs queried so far).'} "
+            f"Cleared after logout (clear key), duplicate deletes, or when the browser tab reloads."
+        )
+
     if duplicate_report:
         if duplicate_report['duplicate_cids'] > 0:
             st.warning(f"🚨 **Duplicate Detection**: Found {duplicate_report['duplicate_cids']} CIDs with duplicates!")
@@ -1461,6 +1498,7 @@ def display_verification_results():
                                         'report': verification_report
                                     }
                                     
+                                    everpin_discard_snapshot_cache()
                                     # Clear confirmation dialog
                                     del st.session_state.show_delete_confirmation
                                     st.rerun()
@@ -1548,6 +1586,7 @@ def display_verification_results():
                         # Also clear the preserved duplicate report since cleanup is complete
                         if hasattr(st.session_state, 'current_duplicate_report'):
                             del st.session_state.current_duplicate_report
+                        everpin_discard_snapshot_cache()
                         st.rerun()
             
             # Show top duplicates
@@ -1625,8 +1664,14 @@ def verify_collection_pins(df, service_name, api_key):
         
         if cids_to_verify:
             from utils import verify_pinned_cids
+            
+            snapshot = everpin_resolve_session_snapshot(service_name, api_key)
+
             verified_count, total_count, details, duplicate_report = verify_pinned_cids(
-                service_name, api_key, cids_to_verify
+                service_name,
+                api_key,
+                cids_to_verify,
+                pin_session_store=snapshot,
             )
             
             # Create lookup for pin verification results
@@ -1739,7 +1784,7 @@ def verify_collection_pins_with_duplicates(df, service_name, api_key):
         st.warning("⚠️ No collection data to verify.")
         return
     
-    with st.spinner("🔍 Performing full duplicate scan... This may take several minutes for large accounts."):
+    with st.spinner("🔍 Verifying pins & scanning duplicates (4EVER Pin CID-filter batch; full list only if fallback)..."):
         # Collect all CIDs to verify from all assets regardless of status
         cids_to_verify = []
         
@@ -1762,8 +1807,14 @@ def verify_collection_pins_with_duplicates(df, service_name, api_key):
         
         if cids_to_verify:
             from utils import verify_pinned_cids_with_duplicate_detection
+
+            snapshot = everpin_resolve_session_snapshot(service_name, api_key)
+
             verified_count, total_count, details, duplicate_report = verify_pinned_cids_with_duplicate_detection(
-                service_name, api_key, cids_to_verify
+                service_name,
+                api_key,
+                cids_to_verify,
+                pin_session_store=snapshot,
             )
             
             # Create lookup for pin verification results
